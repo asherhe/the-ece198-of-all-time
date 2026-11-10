@@ -21,7 +21,7 @@
 #include <Adafruit_GFX.h>
 #include <Arduino.h>
 
-void OLED::setup() {
+void OLED::begin() {
   // I2C
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.clearDisplay();

@@ -3,11 +3,11 @@
 #include <Arduino.h>
 
 // Constants
-const float GRAVITY = 9.81;        // m/s^2
-const float ACCEL_SCALE = 16384.0; // LSB/g for +/- 2g range
+#define GRAVITY 9.81        // m/s^2
+#define ACCEL_SCALE 16384.0 // LSB/g for +/- 2g range
 
 // Smoothing factor (0.0 to 1.0). Lower = smoother, higher = more responsive.
-const float ALPHA = 0.2;
+#define ALPHA 0.2
 
 class Accelerometer {
 private:
@@ -23,6 +23,6 @@ private:
 public:
   Accelerometer(int MPU_addr) : MPU_addr(MPU_addr) {}
 
-  void setup();
+  void begin();
   void loop();
 };

@@ -20,7 +20,9 @@
 #include <Wire.h>
 
 // screen variables
-const int SCREEN_WIDTH = 128, SCREEN_HEIGHT = 64, OLED_RESET = -1;
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
 
 class OLED {
 private:
@@ -32,10 +34,10 @@ private:
 
   bool bigHeart = false;
 
-  unsigned int heart_rate =
-      150; // replace this with the oximeter heart rate
-  unsigned long workout_time =
-      30 * 60 * 1000; // 30 minutes; the physician should be able to set this
+  // replace this with the oximeter heart rate
+  unsigned int heart_rate = 150;
+  // 30 minutes; the physician should be able to set this
+  unsigned long workout_time = 30 * 60 * 1000;
 
   void draw_frame(bool big_or_small);
   void update_bpm();
@@ -45,12 +47,13 @@ private:
 public:
   OLED() : display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET) {}
 
-  void setup();
+  void begin();
   void loop();
 };
 
 // heart objects (including bitmaps)
-const int HEART_WIDTH = 64, HEART_HEIGHT = 64;
+#define HEART_WIDTH 64
+#define HEART_HEIGHT 64
 
 static const unsigned char PROGMEM big_heart[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
