@@ -1,23 +1,23 @@
+#pragma once
+
+#include <Arduino.h>
 #include <Wire.h>
 
 // MPU6050 I2C address
 const int MPU_addr = 0x68; 
 
 // Raw acceleration variables
-int16_t ax_raw, ay_raw, az_raw;
+inline int16_t ax_raw, ay_raw, az_raw;
 
 // Constants
 const float GRAVITY = 9.81; // m/s^2
 const float ACCEL_SCALE = 16384.0; // LSB/g for +/- 2g range
 
 // Low-pass filter variable
-float filtered_accel = 0.0;
+inline float filtered_accel = 0.0;
 const float ALPHA = 0.2; // Smoothing factor (0.0 to 1.0). Lower = smoother, higher = more responsive.
 
-void setup() {
-  Serial.begin(9600);
-  Wire.begin();
-  
+inline void accel_setup() {  
   // Wake up the MPU6050
   Wire.beginTransmission(MPU_addr);
   Wire.write(0x6B); // PWR_MGMT_1 register
@@ -27,7 +27,7 @@ void setup() {
   delay(100);
 }
 
-void loop() {
+inline void accel_loop() {
   // Read accelerometer data starting from register 0x3B (ACCEL_XOUT_H)
   Wire.beginTransmission(MPU_addr);
   Wire.write(0x3B);

@@ -1,9 +1,17 @@
+#include "Accelerometer.hpp"
+#include "OLED.hpp"
+
 void setup() {
   Serial.begin(9600);
-  Serial.println("Hello!");
+  Wire.begin();
+
+  accel_setup();
+  oled_setup();
+
+  Serial.println("setup successfully concluded");
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-
+  accel_loop();
+  oled_loop();
 }

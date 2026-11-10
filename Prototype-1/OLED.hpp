@@ -14,19 +14,22 @@
 // fitting more information means reduced readability  
 // this code is suboptimal since the entire display is updated every single time; not just the parts that change
 
+#pragma once
+
 // libraries
+#include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
 // declarations for custom functions
-void draw_frame(bool big_or_small);
-void draw_heart(bool big_or_small);
-void update_bpm();
-void time_left();
+inline void draw_frame(bool big_or_small);
+inline void draw_heart(bool big_or_small);
+inline void update_bpm();
+inline void time_left();
 
-unsigned int heart_rate = 150; // replace this with the oximeter heart rate
-unsigned long workout_time = 30*60*1000; // 30 minutes; the physician should be able to set this
+inline unsigned int heart_rate = 150; // replace this with the oximeter heart rate
+inline unsigned long workout_time = 30*60*1000; // 30 minutes; the physician should be able to set this
 
 // screen variables
 #define SCREEN_WIDTH 128
@@ -34,7 +37,7 @@ unsigned long workout_time = 30*60*1000; // 30 minutes; the physician should be 
 #define OLED_RESET -1
 
 // display object
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+inline Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // heart objects (including bitmaps)
 #define HEART_WIDTH 64
@@ -110,21 +113,20 @@ static const unsigned char PROGMEM small_heart [] = {
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
-void setup() {
+inline void oled_setup() {
   // I2C
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
-
 }
 
 // copied the following from ChatGPT
-unsigned long previousTimeUpdate = 0;
-unsigned long previousHeartUpdate = 0;
+inline unsigned long previousTimeUpdate = 0;
+inline unsigned long previousHeartUpdate = 0;
 
-bool bigHeart = false;
+inline bool bigHeart = false;
 
-void loop() {
+inline void oled_loop() {
     unsigned long currentMillis = millis();
 
     // Update clock every second
