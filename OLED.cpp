@@ -12,6 +12,7 @@
 // the pixels are monochrome
 // after making the pixel art in Krita, I used https://jlamch.net/MXChipWelcome/ for the bitmaps
 // fitting more information means reduced readability  
+// this code is suboptimal since the entire display is updated every single time; not just the parts that change
 
 // libraries
 #include <Wire.h>
