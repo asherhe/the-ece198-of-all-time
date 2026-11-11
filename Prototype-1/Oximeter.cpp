@@ -14,6 +14,7 @@ void Oximeter::begin() {
 }
 
 bool Oximeter::sample() {
+  particleSensor.check();
   while (particleSensor.available()) {
     redBuffer[bufferIdx] = particleSensor.getRed();
     irBuffer[bufferIdx] = particleSensor.getIR();

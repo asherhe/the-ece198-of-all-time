@@ -1,4 +1,5 @@
 #include "Accelerometer.hpp"
+#include "Scheduler.hpp"
 #include "OLED.hpp"
 #include "Oximeter.hpp"
 
@@ -6,37 +7,31 @@ OLED oled;
 Oximeter oximeter;
 Accelerometer accel(0x68);
 
-// Low-pass filter variable
-float filtered_accel = 0.0;
+Scheduler scheduler;
 
 void setup() {
   Serial.begin(115200);
+  while (!Serial && millis() < 3000);
   Wire.begin();
+  Serial.println("initialized I2C");
 
   accel.begin();
-  oled.begin();
+  Serial.println("accelerometer initialization complete");
   oximeter.begin();
+  Serial.println("oximeter initialization complete");
+  oled.begin();
+  Serial.println("OLED initialization complete");
+
+  scheduler.begin(200);
+  scheduler.registerDevice(&accel);
 
   Serial.println("setup successfully completed");
 }
 
 void loop() {
-  Vec3 a = accel.read();
+  scheduler.loop();
 
-  // Calculate overall 3D acceleration magnitude
-  float current_linear_accel = sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
-
-  // Apply a small threshold deadzone to eliminate static sensor noise near zero
-  if (abs(current_linear_accel) < 0.15) {
-    current_linear_accel = 0.0;
-  }
-
-  // Apply Low-Pass Filter: filtered = (alpha * current) + ((1 - alpha) * previous)
-  filtered_accel = (ALPHA * current_linear_accel) + ((1.0 - ALPHA) * filtered_accel);
-
-  // Output results to the Serial Monitor
-  Serial.print("a:");
-  Serial.println(filtered_accel);
+  // accel.loop();
 
   if (oximeter.sample()) {
     Serial.println("new oximeter sample");

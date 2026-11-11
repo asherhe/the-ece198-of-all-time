@@ -13,7 +13,7 @@ void Accelerometer::begin() {
 Vec3 Accelerometer::read() {
   Wire.beginTransmission(MPU_addr);
   Wire.write(ACCEL_XOUT_H);
-  Wire.endTransmission(false);
+  Wire.endTransmission(true);
   Wire.requestFrom(MPU_addr, 6, true);
 
   float accel[3];
@@ -23,4 +23,26 @@ Vec3 Accelerometer::read() {
   }
 
   return {accel[0], accel[1], accel[2]};
+}
+
+void Accelerometer::loop() {
+  if (sampleFlag) {
+    sampleFlag = false;
+    Vec3 a = read();
+
+    // Calculate overall 3D acceleration magnitude
+    float current_linear_accel = sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+
+    // Apply a small threshold deadzone to eliminate static sensor noise near zero
+    if (abs(current_linear_accel) < 0.15) {
+      current_linear_accel = 0.0;
+    }
+
+    // Apply Low-Pass Filter: filtered = (alpha * current) + ((1 - alpha) * previous)
+    filtered_accel = (ALPHA * current_linear_accel) + ((1.0 - ALPHA) * filtered_accel);
+
+    // Output results to the Serial Monitor
+    Serial.print("a:");
+    Serial.println(filtered_accel);
+  }
 }
