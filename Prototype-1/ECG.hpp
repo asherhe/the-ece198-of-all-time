@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <EEPROM.h>
 
+// disable EEPROM for prototype to save memory lifespan
+#define DISABLE_EEPROM_WRITE
+
 struct ECGRaw {
   int diff_node;   
   int wilson_node; 
@@ -80,6 +83,7 @@ private:
   // Iterates the flash streaming engine on a 100 Hz cadence during raw sample collection
   void tickFlashBackgroundWorker() {
     if (!isSavingToFlash) return;
+#ifndef DISABLE_EEPROM_WRITE
     if (storageIndex & 1) return; // Downsample 200 Hz processing to a 100 Hz flash save cadence
 
     int historicalIndex = (storageIndex - (FLASH_STORAGE_SIZE * 2) + (flashSampleCounter * 2)) & RAM_STORAGE_MASK;
@@ -105,6 +109,7 @@ private:
     if (flashSampleCounter >= FLASH_STORAGE_SIZE || flashCurrentWriteAddress >= EEPROM.length() - 2) {
       isSavingToFlash = false; 
     }
+#endif
   }
 
   // Checks time trackers to automatically flag and start flash dumps
@@ -232,6 +237,7 @@ public:
 
   // Initializes the asynchronous 10-second history recording queue
   void triggerFlashSave(uint32_t timestamp) {
+#ifndef DISABLE_EEPROM_WRITE
     if (isSavingToFlash) return; 
     
     isSavingToFlash = true;
@@ -245,6 +251,7 @@ public:
     int baseHistoryIndex = (storageIndex - FLASH_STORAGE_SIZE * 2) & RAM_STORAGE_MASK;
     lastFlashDiffValue = storageBuffer_diff[baseHistoryIndex];
     lastFlashWilsonValue = storageBuffer_wils[baseHistoryIndex];
+#endif
   }
 
   bool isFlashSavingBusy() {
