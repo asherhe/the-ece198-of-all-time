@@ -1,6 +1,6 @@
 // @author Philip Turturea
 // @date 2026-11-09
-// @version 1.0
+// @version 1.delay
 // @since 1.0 Displays user heart rate (in BPM) inside a beating heart
 //			  and a countdown timer until the end of the session
 // @adapted from ECE 198 Lab 4 code (OLED initialization)

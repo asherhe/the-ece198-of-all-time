@@ -9,27 +9,26 @@ void Oximeter::begin() {
 
   // ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange
   particleSensor.setup(60, 4, 2, 100, 411, 4096);
+
+  bufferIdx = 0;
 }
 
-void Oximeter::loop() {
-  // read samples into data buffer
-  // note that this is blocking
-  for (byte i = 0; i < OX_BUFFER_SIZE; i++) {
-    while (particleSensor.available() == false) // Wait for new data
-      particleSensor.check();
+bool Oximeter::sample() {
+  while (particleSensor.available()) {
+    redBuffer[bufferIdx] = particleSensor.getRed();
+    irBuffer[bufferIdx] = particleSensor.getIR();
+    ++bufferIdx;
+    particleSensor.nextSample();
 
-    redBuffer[i] = particleSensor.getRed();
-    irBuffer[i] = particleSensor.getIR();
-    particleSensor.nextSample(); // Move to next sample set
+    if (bufferIdx >= OX_BUFFER_SIZE) {
+      maxim_heart_rate_and_oxygen_saturation(irBuffer, OX_BUFFER_SIZE, redBuffer,
+                                          &spO2, &validSpO2, &heartRate,
+                                          &validHeartRate);
+      bufferIdx = 0;
+      // stop sampling once we have a result
+      return true;
+    }
   }
 
-  // calculate SpO2, heart rate from gathered data
-  maxim_heart_rate_and_oxygen_saturation(irBuffer, OX_BUFFER_SIZE, redBuffer,
-                                         &spO2, &validSpO2, &heartRate,
-                                         &validHeartRate);
-
-  Serial.print("heart rate: ");
-  Serial.print(heartRate);
-  Serial.print(", SpO2: ");
-  Serial.println(spO2);
+  return false;
 }
