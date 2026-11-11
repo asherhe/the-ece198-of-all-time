@@ -13,12 +13,12 @@ void Accelerometer::begin() {
 Vec3 Accelerometer::read() {
   Wire.beginTransmission(MPU_addr);
   Wire.write(ACCEL_XOUT_H);
-  Wire.endTransmission(true);
+  Wire.endTransmission(false);
   Wire.requestFrom(MPU_addr, 6, true);
 
   float accel[3];
   for (int i = 0; i < 3; ++i) {
-    int raw = Wire.read() << 8 | Wire.read();
+    int16_t raw = Wire.read() << 8 | Wire.read();
     accel[i] = ((float)raw / ACCEL_SCALE) * GRAVITY;
   }
 
@@ -29,6 +29,7 @@ void Accelerometer::loop() {
   if (sampleFlag) {
     sampleFlag = false;
     Vec3 a = read();
+    Serial.print(a.x);Serial.print(",");Serial.print(a.y);Serial.print(",");Serial.println(a.z);
 
     // Calculate overall 3D acceleration magnitude
     float current_linear_accel = sqrt(a.x * a.x + a.y * a.y + a.z * a.z);

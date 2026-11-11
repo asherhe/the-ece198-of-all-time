@@ -34,7 +34,6 @@ void loop() {
   accel.loop();
 
   if (oximeter.sample()) {
-    Serial.println("new oximeter sample");
     Serial.print("pulse:");
     Serial.print(oximeter.heartRate);
     Serial.print("SpO2:");

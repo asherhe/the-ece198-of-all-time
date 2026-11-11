@@ -33,7 +33,7 @@ public:
   void begin();
   Vec3 read();  // read 3-axis acceleration in m/s^2
 
-  uint16_t getFreq() override { return 10; }
+  uint16_t getFreq() override { return 50; }
   void onTick() override { sampleFlag = true; }
   void loop();
 };
