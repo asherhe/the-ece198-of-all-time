@@ -34,10 +34,11 @@ void loop() {
   accel.loop();
 
   if (oximeter.sample()) {
-    Serial.print("pulse:");
-    Serial.print(oximeter.heartRate);
-    Serial.print("SpO2:");
-    Serial.println(oximeter.spO2);
+    oled.heart_rate = oximeter.heartRate;
+    // Serial.print("pulse:");
+    // Serial.print(oximeter.heartRate);
+    // Serial.print("SpO2:");
+    // Serial.println(oximeter.spO2);
   }
  
   oled.loop();

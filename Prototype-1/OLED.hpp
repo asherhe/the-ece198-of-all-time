@@ -34,11 +34,6 @@ private:
 
   bool bigHeart = false;
 
-  // replace this with the oximeter heart rate
-  unsigned int heart_rate = 150;
-  // 30 minutes; the physician should be able to set this
-  unsigned long workout_time = 30 * 60 * 1000;
-
   void draw_frame(bool big_or_small);
   void update_bpm();
   void draw_heart(bool big_or_small);
@@ -46,6 +41,11 @@ private:
 
 public:
   OLED() : display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET) {}
+
+  // replace this with the oximeter heart rate
+  unsigned int heart_rate = 150;
+  // 30 minutes; the physician should be able to set this
+  unsigned long workout_time = 30 * 60 * 1000;
 
   void begin();
   void loop();

@@ -29,7 +29,7 @@ void Accelerometer::loop() {
   if (sampleFlag) {
     sampleFlag = false;
     Vec3 a = read();
-    Serial.print(a.x);Serial.print(",");Serial.print(a.y);Serial.print(",");Serial.println(a.z);
+    // Serial.print(a.x);Serial.print(",");Serial.print(a.y);Serial.print(",");Serial.println(a.z);
 
     // Calculate overall 3D acceleration magnitude
     float current_linear_accel = sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
