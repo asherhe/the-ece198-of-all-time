@@ -31,7 +31,7 @@ void setup() {
 void loop() {
   scheduler.loop();
 
-  // accel.loop();
+  accel.loop();
 
   if (oximeter.sample()) {
     Serial.println("new oximeter sample");

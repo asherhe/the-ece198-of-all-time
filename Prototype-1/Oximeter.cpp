@@ -8,7 +8,7 @@ void Oximeter::begin() {
   }
 
   // ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange
-  particleSensor.setup(60, 4, 2, 100, 411, 4096);
+  particleSensor.setup(60, 2, 2, 100, 118, 4096);
 
   bufferIdx = 0;
 }
