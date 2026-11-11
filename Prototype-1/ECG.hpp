@@ -38,8 +38,8 @@ private:
   int firIndex = 0;
 
   // Circular buffers holding the running 10-second history window
-  int32_t storageBuffer_diff[RAM_STORAGE_SIZE];
-  int32_t storageBuffer_wils[RAM_STORAGE_SIZE];
+  int16_t storageBuffer_diff[RAM_STORAGE_SIZE];
+  int16_t storageBuffer_wils[RAM_STORAGE_SIZE];
   int storageIndex = 0;
 
   // Asynchronous background flash worker state variables
@@ -223,6 +223,12 @@ public:
       storageBuffer_diff[storageIndex] = shiftAndRoundQ28(acc_diff);
       storageBuffer_wils[storageIndex] = shiftAndRoundQ28(acc_wils);
       storageIndex = (storageIndex + 1) & RAM_STORAGE_MASK;
+
+      // write ECG output to Serial
+      Serial.print("diff:");
+      Serial.print(storageBuffer_diff[(storageIndex-1)&RAM_STORAGE_MASK]);
+      Serial.print("wils:");
+      Serial.println(storageBuffer_wils[(storageIndex-1)&RAM_STORAGE_MASK]);
 
       // Processes background data flash burning steps asynchronously 
       tickFlashBackgroundWorker();

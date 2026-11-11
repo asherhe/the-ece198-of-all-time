@@ -19,7 +19,7 @@ void setup() {
 
   accel.begin();
   Serial.println("accelerometer initialization complete");
-  ECG.begin();
+  ecg.begin();
   Serial.println("ECG initialization complete");
   oximeter.begin();
   Serial.println("oximeter initialization complete");
