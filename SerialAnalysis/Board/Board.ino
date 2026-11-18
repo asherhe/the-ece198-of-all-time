@@ -3,7 +3,6 @@
 #include "MAX30105.h"
 #include "OLED.hpp"
 
-
 // Wire format is documented in ../README.md. All integers are little endian.
 static const uint8_t ECG_TYPE = 1, ACCEL_TYPE = 2, OPTICAL_TYPE = 3;
 static const uint8_t DISPLAY_TYPE = 0x80;
@@ -49,10 +48,23 @@ static void flushEcg() { if (ecgCount) { sendFrame(ECG_TYPE, ecgFirst, ecgCount,
 static void flushAccel() { if (accelCount) { sendFrame(ACCEL_TYPE, accelFirst, accelCount, accelData, accelCount * 6); accelCount = 0; } }
 static void flushOptical() { if (opticalCount) { sendFrame(OPTICAL_TYPE, opticalFirst, opticalCount, opticalData, opticalCount * 12); opticalCount = 0; } }
 
-// Isolates multiplexed ADC channels with a settling delay and 4x oversampling
-static uint16_t readSettledEcg(uint8_t pin) {
-  analogRead(pin);          // Switch internal MUX to target pin
-  delayMicroseconds(15);    // Let custom circuit impedance settle on sample-and-hold capacitor
+// Discharges internal ADC sample-and-hold capacitor via internal MUX GND (no extra pins used)
+static void drainAdcCapacitor() {
+#if defined(ADMUX)
+  uint8_t prevMux = ADMUX;
+  ADMUX = (prevMux & 0xF0) | 0x0F; // Connect internal ADC MUX directly to chip GND (0V)
+  ADCSRA |= (1 << ADSC);           // Start dummy conversion to discharge capacitor
+  while (ADCSRA & (1 << ADSC));    // Wait for discharge to finish
+  ADMUX = prevMux;
+#endif
+}
+
+// Isolates A0 and A1 without using any extra analog pins
+static uint16_t readIsolatedEcg(uint8_t pin) {
+  drainAdcCapacitor();      // Discharge leftover voltage from previous channel inside the chip
+  analogRead(pin);          // Switch MUX to target pin
+  delayMicroseconds(250);   // Allow high-impedance Wilson network to charge ADC capacitor
+
   uint32_t sum = 0;
   for (uint8_t i = 0; i < 4; ++i) {
     sum += analogRead(pin);
@@ -63,8 +75,8 @@ static uint16_t readSettledEcg(uint8_t pin) {
 static void sampleEcg(uint32_t t) {
   if (!ecgCount) ecgFirst = t;
   uint8_t *p = ecgData + ecgCount * 4;
-  put16(p, readSettledEcg(A0));
-  put16(p + 2, readSettledEcg(A1));
+  put16(p, readIsolatedEcg(A0));
+  put16(p + 2, readIsolatedEcg(A1));
   if (++ecgCount == 8) flushEcg();
 }
 static void sampleAccel(uint32_t t) {
