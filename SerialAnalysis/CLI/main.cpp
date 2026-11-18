@@ -40,12 +40,12 @@ int main(int argc,char** argv) {
     if(argc==2 && std::string(argv[1])=="--self-test") {
       uint8_t frame[18]{};frame[0]=0xa5;frame[1]=0x5a;frame[2]=1;
       w16(frame+3,42);w32(frame+5,123456);frame[9]=1;w16(frame+10,4);
-      w16(frame+12,512);w16(frame+14,600);w16(frame+16,crc16(frame+2,14));
+      w16(frame+12,8192);w16(frame+14,9000);w16(frame+16,crc16(frame+2,14));
       Decoder d;int accepted=0;
       d.feed(frame,5,[&](const Frame&){++accepted;});
       d.feed(frame+5,13,[&](const Frame& f){if(f.seq==42&&f.t==123456&&f.data.size()==4)++accepted;});
       frame[12]^=1;d.feed(frame,18,[&](const Frame&){++accepted;});
-      EcgFilter e;double result=e.run(512);
+      EcgFilter e;double result=e.run(8192);
       if(accepted!=1||d.bad!=1||!std::isfinite(result)) throw std::runtime_error("self-test failed");
       std::cout<<"self-test passed\n";return 0;
     }
@@ -63,19 +63,28 @@ int main(int argc,char** argv) {
     ecg<<"board_us,diff_raw,wilson_raw,diff_filtered,wilson_filtered\n";
     accel<<"board_us,magnitude_m_s2,smoothed_m_s2\n";
     vitals<<"board_us,heart_rate_bpm,heart_rate_valid,spo2_percent,spo2_valid\n";
-    Port port(portName); Decoder decoder; EcgFilter diff,wilson; Pulse pulse;
+    Port port(portName); Decoder decoder; EcgFilter diff(16383.0), wilson(16383.0); Pulse pulse;
     auto start=Clock::now(), lastDisplay=start, lastStatus=start; bool haveSeq=false; uint16_t prevSeq=0;
     uint64_t gaps=0,frames=0,ecgSamples=0,accelSamples=0,opticalSamples=0;
     uint64_t epoch=0; uint32_t prevTime=0; bool haveTime=false; AccelerationAnalysis motion;
-    auto unwrap=[&](uint32_t t)->uint64_t {if(haveTime&&t<prevTime&&prevTime-t>0x80000000u)epoch+=1ull<<32;
-      prevTime=t;haveTime=true;return epoch+t;};
+    auto unwrap=[&](uint32_t t)->uint64_t {
+      if(haveTime && t < prevTime) {
+        if(prevTime - t > 0x80000000u) epoch += 1ull<<32;
+        else { diff.reset(); wilson.reset(); }
+      }
+      prevTime=t;haveTime=true;return epoch+t;
+    };
     std::cout<<"Recording to "<<dir<<"\n";
     while(!stopping && Clock::now()-start<std::chrono::minutes(duration)) {
       uint8_t buf[1024]; int n=port.read(buf,sizeof(buf));
       decoder.feed(buf,n,[&](const Frame& f) {
         int width=f.type==1?4:f.type==2?6:f.type==3?12:0;
         if(!width || f.count==0 || f.data.size()!=size_t(f.count*width)) return;
-        if(haveSeq) gaps+=uint16_t(f.seq-prevSeq-1); prevSeq=f.seq;haveSeq=true;++frames;
+        if(haveSeq) {
+          uint16_t missed = uint16_t(f.seq - prevSeq - 1);
+          if(missed > 0) { gaps += missed; diff.reset(); wilson.reset(); }
+        }
+        prevSeq=f.seq;haveSeq=true;++frames;
         uint64_t t0=unwrap(f.t);
         for(int i=0;i<f.count;++i) {
           const uint8_t* p=f.data.data()+i*width;
