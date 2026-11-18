@@ -111,7 +111,9 @@ static void receiveDisplay() {
 
 void setup() {
   Serial.begin(115200);
+#if defined(ARDUINO_ARCH_RENESAS) || defined(ARDUINO_ARCH_SAMD) || defined(ARDUINO_ARCH_ESP32)
   analogReadResolution(14);
+#endif
   pinMode(A0, INPUT);
   pinMode(A1, INPUT);
   Wire.begin();
