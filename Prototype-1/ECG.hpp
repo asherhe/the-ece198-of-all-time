@@ -1,5 +1,5 @@
-#ifndef ECG_HPP
-#define ECG_HPP
+#ifndef ECG
+#define ECG
 
 #include <Arduino.h>
 #include <EEPROM.h>
