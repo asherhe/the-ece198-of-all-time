@@ -40,7 +40,8 @@ void loop() {
   ecg.loop();
 
   if (oximeter.sample()) {
-    oled.heart_rate = oximeter.heartRate;
+    if (oximeter.validHeartRate)
+      oled.heart_rate = oximeter.heartRate;
     // Serial.print("pulse:");
     // Serial.print(oximeter.heartRate);
     // Serial.print("SpO2:");
