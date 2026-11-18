@@ -48,10 +48,22 @@ static void flushEcg() { if (ecgCount) { sendFrame(ECG_TYPE, ecgFirst, ecgCount,
 static void flushAccel() { if (accelCount) { sendFrame(ACCEL_TYPE, accelFirst, accelCount, accelData, accelCount * 6); accelCount = 0; } }
 static void flushOptical() { if (opticalCount) { sendFrame(OPTICAL_TYPE, opticalFirst, opticalCount, opticalData, opticalCount * 12); opticalCount = 0; } }
 
+// Isolates multiplexed ADC channels with a settling delay and 4x oversampling
+static uint16_t readSettledEcg(uint8_t pin) {
+  analogRead(pin);          // Switch internal MUX to target pin
+  delayMicroseconds(15);    // Let custom circuit impedance settle on sample-and-hold capacitor
+  uint32_t sum = 0;
+  for (uint8_t i = 0; i < 4; ++i) {
+    sum += analogRead(pin);
+  }
+  return uint16_t(sum >> 2);
+}
+
 static void sampleEcg(uint32_t t) {
   if (!ecgCount) ecgFirst = t;
   uint8_t *p = ecgData + ecgCount * 4;
-  put16(p, analogRead(A0)); put16(p + 2, analogRead(A1));
+  put16(p, readSettledEcg(A0));
+  put16(p + 2, readSettledEcg(A1));
   if (++ecgCount == 8) flushEcg();
 }
 static void sampleAccel(uint32_t t) {
@@ -99,6 +111,9 @@ static void receiveDisplay() {
 
 void setup() {
   Serial.begin(115200);
+  analogReadResolution(14);
+  pinMode(A0, INPUT);
+  pinMode(A1, INPUT);
   Wire.begin();
   Wire.beginTransmission(0x68); Wire.write(0x6b); Wire.write(0); Wire.endTransmission(true);
   opticalReady = optical.begin(Wire, I2C_SPEED_FAST);
