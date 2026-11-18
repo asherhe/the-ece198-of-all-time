@@ -3,6 +3,7 @@
 #include "MAX30105.h"
 #include "OLED.hpp"
 
+
 // Wire format is documented in ../README.md. All integers are little endian.
 static const uint8_t ECG_TYPE = 1, ACCEL_TYPE = 2, OPTICAL_TYPE = 3;
 static const uint8_t DISPLAY_TYPE = 0x80;
