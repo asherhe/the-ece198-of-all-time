@@ -30,9 +30,10 @@ SerialAnalysis/CLI/build/serial-analysis.exe --port COM3 --output sessions --dur
 Replace `COM3` with the board's port. The CLI creates a dated session folder
 with `ecg.csv`, `acceleration.csv`, `vitals.csv`, and `metadata.json`. Ctrl+C
 stops and closes the session. On Linux, pass a device such as `/dev/ttyACM0`.
-The serial port is 115200 baud, 8N1, with no flow control. Opening it may
-reset the board; recording begins immediately and the first samples may be
-missed during that reset.
+The serial port is 115200 baud, 8N1, with no flow control. On Windows, the CLI
+leaves DTR deasserted so opening a classic Arduino UNO does not trigger its
+USB-serial auto-reset. Other serial tools may assert DTR and reset the board.
+Recording begins immediately.
 
 ## Wire format, version 1
 
