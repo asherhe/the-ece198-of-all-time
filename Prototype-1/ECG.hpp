@@ -1,12 +1,14 @@
+#ifndef ECG_HPP
+#define ECG_HPP
+
 #include <Arduino.h>
 #include <EEPROM.h>
-
-// disable EEPROM for prototype to save memory lifespan
-#define DISABLE_EEPROM_WRITE
+#include "ITickable.hpp"
 
 struct ECGRaw {
-  int diff_node;   
-  int wilson_node; 
+  int diff_node;
+  int wilson_node;
+  bool is_clipped;
 };
 
 class ECG : public ITickable {
@@ -14,125 +16,166 @@ private:
   uint8_t pinDiff;
   uint8_t pinWils;
 
-  // Power-of-2 RAM window sizes for high-speed bitwise masking (& 2047)
   static const int RAM_STORAGE_SIZE = 2048;
   static const int RAM_STORAGE_MASK = RAM_STORAGE_SIZE - 1;
   static const int FLASH_STORAGE_SIZE = 1024;
 
-  // Q28 Fixed-Point Butterworth Filter Coefficients (40 Hz LP @ 200 Hz fs)
+  static const int32_t ADC_MAX = 16383;
+  static const int32_t RAIL_MARGIN = 150;
+  static const int32_t MAX_SLEW_PER_SAMPLE = 2500;
+
   const int64_t b10 = 24511874, b11 = 49023748, b12 = 24511874;
   const int64_t a11 = -263375836, a12 = 92986877;
   const int64_t b20 = 40044810,  b21 = 80089620,  b22 = 40044810;
   const int64_t a21 = -143201402, a22 = 34946300;
 
-  // Direct mathematical filter history structures
-  int64_t iir_D1 = {0}; int64_t iir_D2 = {0};
-  int64_t iir_W1 = {0}; int64_t iir_W2 = {0};
+  int64_t iir_D1[4] = {0};
+  int64_t iir_D2[4] = {0};
+  int64_t iir_W1[4] = {0};
+  int64_t iir_W2[4] = {0};
 
-  // Q28 Linear-Phase FIR High-Pass Configuration (0.5 Hz HP @ 200 Hz fs)
-  static const int FIR_TAPS = 201; 
-  int32_t h[FIR_TAPS];               
+  static const int FIR_TAPS = 201;
+  int32_t h[FIR_TAPS];
 
   int32_t firBuffer_diff[FIR_TAPS] = {0};
   int32_t firBuffer_wils[FIR_TAPS] = {0};
   int firIndex = 0;
 
-  // Circular buffers holding the running 10-second history window
-  int16_t storageBuffer_diff[RAM_STORAGE_SIZE];
-  int16_t storageBuffer_wils[RAM_STORAGE_SIZE];
+  int32_t dcEstimateDiff = 8192;
+  int32_t dcEstimateWils = 8192;
+  int32_t prevCleanRawDiff = 8192;
+  int32_t prevCleanRawWils = 8192;
+
+  int32_t storageBuffer_diff[RAM_STORAGE_SIZE];
+  int32_t storageBuffer_wils[RAM_STORAGE_SIZE];
+  bool clipBuffer[RAM_STORAGE_SIZE];
   int storageIndex = 0;
 
-  // Asynchronous background flash worker state variables
   bool isSavingToFlash = false;
   uint32_t flashSavedTimestamp = 0;
   int flashCurrentWriteAddress = 0;
   int flashSampleCounter = 0;
   int32_t lastFlashDiffValue = 0;
   int32_t lastFlashWilsonValue = 0;
+  uint8_t flatRunCount = 0;
 
-  // --- Automation Scheduling Variables ---
-  uint32_t intervalMs = 0;          // 0 means interval logging is disabled
+  uint32_t intervalMs = 0;
   uint32_t lastIntervalTriggerMs = 0;
-  
-  uint32_t specificTargetTimeMs = 0;// 0 means specific timestamp target is disabled
+  uint32_t specificTargetTimeMs = 0;
   bool specificTimeTriggered = false;
 
   volatile bool sampleFlag = false;
 
-  // Computes the linear-phase Hamming-windowed Sinc array into Q28 integer space
+  int32_t readIsolatedOversampled(uint8_t pin) {
+    analogRead(pin);
+    delayMicroseconds(15);
+
+    int32_t sum = 0;
+    for (int i = 0; i < 4; i++) {
+      sum += analogRead(pin);
+    }
+    return sum >> 2;
+  }
+
+  int32_t conditionRawInput(int32_t rawSample, int32_t &prevSample, int32_t &dcEstimate, bool &clippedFlag) {
+    if (rawSample <= RAIL_MARGIN || rawSample >= (ADC_MAX - RAIL_MARGIN)) {
+      clippedFlag = true;
+      rawSample = prevSample;
+    }
+
+    int32_t delta = rawSample - prevSample;
+    if (delta > MAX_SLEW_PER_SAMPLE) {
+      rawSample = prevSample + MAX_SLEW_PER_SAMPLE;
+    } else if (delta < -MAX_SLEW_PER_SAMPLE) {
+      rawSample = prevSample - MAX_SLEW_PER_SAMPLE;
+    }
+
+    prevSample = rawSample;
+    dcEstimate += (rawSample - dcEstimate) >> 6;
+    return rawSample - dcEstimate;
+  }
+
   void generateFixedPointFIR() {
-    float omega_c = 2.0 * PI * 0.5 / 200.0; 
-    int M = FIR_TAPS - 1;               
+    float omega_c = 2.0f * PI * 0.5f / 200.0f;
+    int M = FIR_TAPS - 1;
     for (int k = 0; k < FIR_TAPS; k++) {
       float val;
       if (k == M / 2) {
-        val = 1.0 - (omega_c / PI);
+        val = 1.0f - (omega_c / PI);
       } else {
-        float arg = k - (M / 2.0);
-        val = -(sin(omega_c * arg) / (PI * arg)) * (0.54 - 0.46 * cos((2.0 * PI * k) / M));
+        float arg = k - (M / 2.0f);
+        val = -(sin(omega_c * arg) / (PI * arg)) * (0.54f - 0.46f * cos((2.0f * PI * k) / M));
       }
-      h[k] = (int32_t)(val * 268435456.0f); 
+      h[k] = (int32_t)(val * 268435456.0f);
     }
   }
 
-  // Protects the IIR math pipeline against asymmetric negative bit-shift truncation drift
   inline int32_t shiftAndRoundQ28(int64_t value) {
     return (int32_t)((value + 134217728LL) >> 28);
   }
 
-  // Iterates the flash streaming engine on a 100 Hz cadence during raw sample collection
   void tickFlashBackgroundWorker() {
     if (!isSavingToFlash) return;
-#ifndef DISABLE_EEPROM_WRITE
-    if (storageIndex & 1) return; // Downsample 200 Hz processing to a 100 Hz flash save cadence
+    if (storageIndex & 1) return;
 
     int historicalIndex = (storageIndex - (FLASH_STORAGE_SIZE * 2) + (flashSampleCounter * 2)) & RAM_STORAGE_MASK;
-    
+
     int32_t currentDiff = storageBuffer_diff[historicalIndex];
     int32_t currentWils = storageBuffer_wils[historicalIndex];
 
-    // First-Difference delta computation
     int32_t deltaDiff = currentDiff - lastFlashDiffValue;
     int32_t deltaWils = currentWils - lastFlashWilsonValue;
 
-    // Packs constraints tightly into compressed signed 1-byte blocks
-    int8_t compressedDiffByte = (int8_t)constrain(deltaDiff, -128, 127);
-    int8_t compressedWilsByte = (int8_t)constrain(deltaWils, -128, 127);
+    const int32_t ACTIVITY_THRESHOLD = 15;
+    bool highActivity = (abs(deltaDiff) > ACTIVITY_THRESHOLD) || (abs(deltaWils) > ACTIVITY_THRESHOLD);
 
-    EEPROM.update(flashCurrentWriteAddress++, compressedDiffByte);
-    EEPROM.update(flashCurrentWriteAddress++, compressedWilsByte);
+    if (!highActivity && flashSampleCounter < (FLASH_STORAGE_SIZE - 1)) {
+      flatRunCount++;
+      if (flatRunCount == 255) {
+        EEPROM.update(flashCurrentWriteAddress++, 0x00);
+        EEPROM.update(flashCurrentWriteAddress++, flatRunCount);
+        flatRunCount = 0;
+      }
+      lastFlashDiffValue = currentDiff;
+      lastFlashWilsonValue = currentWils;
+    } else {
+      if (flatRunCount > 0) {
+        EEPROM.update(flashCurrentWriteAddress++, 0x00);
+        EEPROM.update(flashCurrentWriteAddress++, flatRunCount);
+        flatRunCount = 0;
+      }
+      EEPROM.update(flashCurrentWriteAddress++, 0xFF);
 
-    lastFlashDiffValue = currentDiff;
-    lastFlashWilsonValue = currentWils;
+      int8_t compressedDiffByte = (int8_t)constrain(deltaDiff, -128, 127);
+      int8_t compressedWilsByte = (int8_t)constrain(deltaWils, -128, 127);
+
+      EEPROM.update(flashCurrentWriteAddress++, compressedDiffByte);
+      EEPROM.update(flashCurrentWriteAddress++, compressedWilsByte);
+
+      lastFlashDiffValue = currentDiff;
+      lastFlashWilsonValue = currentWils;
+    }
+
     flashSampleCounter++;
 
-    if (flashSampleCounter >= FLASH_STORAGE_SIZE || flashCurrentWriteAddress >= EEPROM.length() - 2) {
-      isSavingToFlash = false; 
+    if (flashSampleCounter >= FLASH_STORAGE_SIZE || flashCurrentWriteAddress >= EEPROM.length() - 3) {
+      isSavingToFlash = false;
     }
-#endif
   }
 
-  // Checks time trackers to automatically flag and start flash dumps
   void checkAutomationSchedules() {
-    if (isSavingToFlash) return; // Flash engine is currently busy
-    
+    if (isSavingToFlash) return;
     uint32_t currentMs = millis();
 
-    // 1. Evaluate Periodic Interval Trigger (e.g., every 5 minutes)
-    if (intervalMs > 0) {
-      if (currentMs - lastIntervalTriggerMs >= intervalMs) {
-        lastIntervalTriggerMs = currentMs; // Step clock reference forward
-        triggerFlashSave(currentMs);
-        return; 
-      }
+    if (intervalMs > 0 && (currentMs - lastIntervalTriggerMs >= intervalMs)) {
+      lastIntervalTriggerMs = currentMs;
+      triggerFlashSave(currentMs);
+      return;
     }
 
-    // 2. Evaluate Preprogrammed Target Timestamp (e.g., exactly 1 minute into operation)
-    if (specificTargetTimeMs > 0 && !specificTimeTriggered) {
-      if (currentMs >= specificTargetTimeMs) {
-        specificTimeTriggered = true; // Burn-once lock flag
-        triggerFlashSave(currentMs);
-      }
+    if (specificTargetTimeMs > 0 && !specificTimeTriggered && (currentMs >= specificTargetTimeMs)) {
+      specificTimeTriggered = true;
+      triggerFlashSave(currentMs);
     }
   }
 
@@ -140,69 +183,79 @@ public:
   ECG(uint8_t diff_pin, uint8_t wilson_pin) : pinDiff(diff_pin), pinWils(wilson_pin) {}
 
   void begin() {
+    analogReadResolution(14);
+    pinMode(pinDiff, INPUT);
+    pinMode(pinWils, INPUT);
+
     generateFixedPointFIR();
-    
-    // Warm-start preloading solution to eliminate the 1-second startup filter spike
-    int32_t initialDiff = analogRead(pinDiff);
-    int32_t initialWils = analogRead(pinWils);
 
-    iir_D1 = initialDiff; iir_D1 = initialDiff; iir_D1 = initialDiff; iir_D1 = initialDiff;
-    iir_W1 = initialWils; iir_W1 = initialWils; iir_W1 = initialWils; iir_W1 = initialWils;
+    int32_t initialDiff = readIsolatedOversampled(pinDiff);
+    int32_t initialWils = readIsolatedOversampled(pinWils);
 
-    for(int i = 0; i < FIR_TAPS; i++) {
-      firBuffer_diff[i] = initialDiff;
-      firBuffer_wils[i] = initialWils;
-    }
+    dcEstimateDiff = initialDiff;
+    dcEstimateWils = initialWils;
+    prevCleanRawDiff = initialDiff;
+    prevCleanRawWils = initialWils;
 
+    memset(iir_D1, 0, sizeof(iir_D1));
+    memset(iir_D2, 0, sizeof(iir_D2));
+    memset(iir_W1, 0, sizeof(iir_W1));
+    memset(iir_W2, 0, sizeof(iir_W2));
+    memset(firBuffer_diff, 0, sizeof(firBuffer_diff));
+    memset(firBuffer_wils, 0, sizeof(firBuffer_wils));
     memset(storageBuffer_diff, 0, sizeof(storageBuffer_diff));
     memset(storageBuffer_wils, 0, sizeof(storageBuffer_wils));
+    memset(clipBuffer, 0, sizeof(clipBuffer));
 
     lastIntervalTriggerMs = millis();
   }
 
-  // Set an automated recurring save interval in milliseconds
   void setScheduleInterval(uint32_t periodicIntervalMs) {
     intervalMs = periodicIntervalMs;
     lastIntervalTriggerMs = millis();
   }
 
-  // Set a one-time preprogrammed time since boot to capture data
   void setScheduledTime(uint32_t preprogrammedTimeMs) {
     specificTargetTimeMs = preprogrammedTimeMs;
     specificTimeTriggered = false;
   }
 
-  // ITickable Interface compliance definitions
   uint16_t getFreq() override { return 200; }
   void onTick() override { sampleFlag = true; }
 
-  // Main system execution block evaluating paced hardware filter steps
   void loop() {
-    // Continually check clocks for automated recording schedules
     checkAutomationSchedules();
 
     if (sampleFlag) {
       sampleFlag = false;
 
-      int32_t rawDiff = analogRead(pinDiff);
-      int32_t rawWils = analogRead(pinWils);
+      int32_t rawDiff = readIsolatedOversampled(pinDiff);
+      int32_t rawWils = readIsolatedOversampled(pinWils);
 
-      // Cascaded 4th-Order Butterworth filtering stage
-      int32_t out_d1 = shiftAndRoundQ28(b10*rawDiff + b11*iir_D1 + b12*iir_D1 - a11*iir_D1 - a12*iir_D1);
-      iir_D1 = iir_D1; iir_D1 = rawDiff; iir_D1 = iir_D1; iir_D1 = out_d1;
-      int32_t out_d2 = shiftAndRoundQ28(b20*out_d1 + b21*iir_D2 + b22*iir_D2 - a21*iir_D2 - a22*iir_D2);
-      iir_D2 = iir_D2; iir_D2 = out_d1; iir_D2 = iir_D2; iir_D2 = out_d2;
+      bool sampleClipped = false;
+      int32_t acDiff = conditionRawInput(rawDiff, prevCleanRawDiff, dcEstimateDiff, sampleClipped);
+      int32_t acWils = conditionRawInput(rawWils, prevCleanRawWils, dcEstimateWils, sampleClipped);
 
-      int32_t out_w1 = shiftAndRoundQ28(b10*rawWils + b11*iir_W1 + b12*iir_W1 - a11*iir_W1 - a12*iir_W1);
-      iir_W1 = iir_W1; iir_W1 = rawWils; iir_W1 = iir_W1; iir_W1 = out_w1;
-      int32_t out_w2 = shiftAndRoundQ28(b20*out_w1 + b21*iir_W2 + b22*iir_W2 - a21*iir_W2 - a22*iir_W2);
-      iir_W2 = iir_W2; iir_W2 = out_w1; iir_W2 = iir_W2; iir_W2 = out_w2;
+      int32_t out_d1 = shiftAndRoundQ28(b10 * acDiff + b11 * iir_D1[2] + b12 * iir_D1[3] - a11 * iir_D1[0] - a12 * iir_D1[1]);
+      iir_D1[3] = iir_D1[2]; iir_D1[2] = acDiff;
+      iir_D1[1] = iir_D1[0]; iir_D1[0] = out_d1;
+
+      int32_t out_d2 = shiftAndRoundQ28(b20 * out_d1 + b21 * iir_D2[2] + b22 * iir_D2[3] - a21 * iir_D2[0] - a22 * iir_D2[1]);
+      iir_D2[3] = iir_D2[2]; iir_D2[2] = out_d1;
+      iir_D2[1] = iir_D2[0]; iir_D2[0] = out_d2;
+
+      int32_t out_w1 = shiftAndRoundQ28(b10 * acWils + b11 * iir_W1[2] + b12 * iir_W1[3] - a11 * iir_W1[0] - a12 * iir_W1[1]);
+      iir_W1[3] = iir_W1[2]; iir_W1[2] = acWils;
+      iir_W1[1] = iir_W1[0]; iir_W1[0] = out_w1;
+
+      int32_t out_w2 = shiftAndRoundQ28(b20 * out_w1 + b21 * iir_W2[2] + b22 * iir_W2[3] - a21 * iir_W2[0] - a22 * iir_W2[1]);
+      iir_W2[3] = iir_W2[2]; iir_W2[2] = out_w1;
+      iir_W2[1] = iir_W2[0]; iir_W2[0] = out_w2;
 
       firBuffer_diff[firIndex] = out_d2;
       firBuffer_wils[firIndex] = out_w2;
 
-      // Branchless unrolled FIR dot-product step calculation 
-      int64_t acc_diff = 0; 
+      int64_t acc_diff = 0;
       int64_t acc_wils = 0;
       int k = 0;
 
@@ -219,37 +272,41 @@ public:
 
       if (++firIndex >= FIR_TAPS) firIndex = 0;
 
-      // Save baseline-corrected calculations directly to RAM storage
-      storageBuffer_diff[storageIndex] = shiftAndRoundQ28(acc_diff);
-      storageBuffer_wils[storageIndex] = shiftAndRoundQ28(acc_wils);
+      int32_t finalDiff = shiftAndRoundQ28(acc_diff);
+      int32_t finalWils = shiftAndRoundQ28(acc_wils);
+
+      storageBuffer_diff[storageIndex] = finalDiff;
+      storageBuffer_wils[storageIndex] = finalWils;
+      clipBuffer[storageIndex] = sampleClipped;
       storageIndex = (storageIndex + 1) & RAM_STORAGE_MASK;
 
-      // write ECG output to Serial
-      Serial.print("diff:");
-      Serial.print(storageBuffer_diff[(storageIndex-1)&RAM_STORAGE_MASK]);
-      Serial.print("wils:");
-      Serial.println(storageBuffer_wils[(storageIndex-1)&RAM_STORAGE_MASK]);
+      Serial.print(finalDiff);
+      Serial.print(",");
+      Serial.print(finalWils);
+      Serial.print(",");
+      Serial.println(sampleClipped ? 1 : 0);
 
-      // Processes background data flash burning steps asynchronously 
       tickFlashBackgroundWorker();
     }
   }
 
-  // Recovers the most recent processed signal coordinate frame from RAM
   ECGRaw read_raw() {
     int lastIndex = (storageIndex - 1) & RAM_STORAGE_MASK;
-    return { (int)storageBuffer_diff[lastIndex], (int)storageBuffer_wils[lastIndex] };
+    return {
+      (int)storageBuffer_diff[lastIndex],
+      (int)storageBuffer_wils[lastIndex],
+      clipBuffer[lastIndex]
+    };
   }
 
-  // Initializes the asynchronous 10-second history recording queue
   void triggerFlashSave(uint32_t timestamp) {
-#ifndef DISABLE_EEPROM_WRITE
-    if (isSavingToFlash) return; 
-    
+    if (isSavingToFlash) return;
+
     isSavingToFlash = true;
     flashSavedTimestamp = timestamp;
     flashCurrentWriteAddress = 0;
     flashSampleCounter = 0;
+    flatRunCount = 0;
 
     EEPROM.put(flashCurrentWriteAddress, flashSavedTimestamp);
     flashCurrentWriteAddress += sizeof(flashSavedTimestamp);
@@ -257,10 +314,11 @@ public:
     int baseHistoryIndex = (storageIndex - FLASH_STORAGE_SIZE * 2) & RAM_STORAGE_MASK;
     lastFlashDiffValue = storageBuffer_diff[baseHistoryIndex];
     lastFlashWilsonValue = storageBuffer_wils[baseHistoryIndex];
-#endif
   }
 
   bool isFlashSavingBusy() {
     return isSavingToFlash;
   }
 };
+
+#endif
