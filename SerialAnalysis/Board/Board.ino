@@ -10,9 +10,11 @@ static const uint32_t HOST_TIMEOUT_MS = 3000;
 MAX30105 optical;
 OLED oled;
 bool opticalReady = false;
+uint32_t nextOpticalRetry = 0;
 uint16_t txSequence = 0;
 uint32_t dropped[3] = {0, 0, 0};
 uint32_t nextEcg = 0, nextAccel = 0, lastHost = 0;
+uint32_t nextAccelWake = 0;
 // Keep each complete frame below a typical 64-byte USB CDC write buffer.
 uint8_t ecgData[32], accelData[30], opticalData[48];
 uint8_t ecgCount = 0, accelCount = 0, opticalCount = 0;
@@ -79,12 +81,26 @@ static void sampleEcg(uint32_t t) {
   put16(p + 2, readIsolatedEcg(A1));
   if (++ecgCount == 8) flushEcg();
 }
+static void wakeAccel() {
+  Wire.beginTransmission(0x68);
+  Wire.write(0x6b);
+  Wire.write(0);
+  Wire.endTransmission(true);
+}
 static void sampleAccel(uint32_t t) {
   Wire.beginTransmission(0x68); Wire.write(0x3b);
   if (Wire.endTransmission(false) != 0 || Wire.requestFrom(0x68, 6, true) != 6) return;
-  if (!accelCount) accelFirst = t;
   uint8_t *p = accelData + accelCount * 6;
   for (uint8_t i = 0; i < 3; ++i) { p[i * 2 + 1] = Wire.read(); p[i * 2] = Wire.read(); }
+  if (!(p[0] | p[1] | p[2] | p[3] | p[4] | p[5])) {
+    // Six zero bytes are not a resting acceleration; retry a missed wake-up.
+    if ((int32_t)(millis() - nextAccelWake) >= 0) {
+      wakeAccel();
+      nextAccelWake = millis() + 1000;
+    }
+    return;
+  }
+  if (!accelCount) accelFirst = t;
   if (++accelCount == 5) flushAccel();
 }
 static void sampleOptical() {
@@ -124,20 +140,39 @@ static void receiveDisplay() {
 
 void setup() {
   Serial.begin(115200);
+  // The working Prototype-1 waits before initializing its I2C devices.
+  // Let the display and sensor power supplies settle after power-up.
+  delay(3000);
+
 #if defined(ARDUINO_ARCH_RENESAS) || defined(ARDUINO_ARCH_SAMD) || defined(ARDUINO_ARCH_ESP32)
   analogReadResolution(14);
 #endif
+
+  // configure analog ports
   pinMode(A0, INPUT);
   pinMode(A1, INPUT);
+
+  // configure accelerometer
   Wire.begin();
-  Wire.beginTransmission(0x68); Wire.write(0x6b); Wire.write(0); Wire.endTransmission(true);
+  wakeAccel();
+  // configure oximeter
   opticalReady = optical.begin(Wire, I2C_SPEED_FAST);
   if (opticalReady) optical.setup(60, 2, 2, 100, 118, 4096);
-  oled.begin(); oled.heart_rate = 0; oled.workout_time = 0;
+  else nextOpticalRetry = millis() + 1000;
+  // configure OLED
+  oled.heart_rate = 0; oled.workout_time = 0; oled.begin();
+
+  // setup timers
   nextEcg = nextAccel = micros();
 }
+
 void loop() {
   receiveDisplay();
+  if (!opticalReady && (int32_t)(millis() - nextOpticalRetry) >= 0) {
+    opticalReady = optical.begin(Wire, I2C_SPEED_FAST);
+    if (opticalReady) optical.setup(60, 2, 2, 100, 118, 4096);
+    else nextOpticalRetry = millis() + 1000;
+  }
   uint32_t now = micros();
   if ((int32_t)(now - nextEcg) >= 0) { sampleEcg(nextEcg); nextEcg += 5000; }
   if ((int32_t)(now - nextAccel) >= 0) { sampleAccel(nextAccel); nextAccel += 20000; }

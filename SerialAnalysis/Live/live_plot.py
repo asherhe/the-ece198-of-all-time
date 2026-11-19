@@ -1,5 +1,7 @@
 """Matplotlib view for the recorder's five-second signal buffers."""
 
+import time
+
 from matplotlib import pyplot as plt
 
 
@@ -25,16 +27,16 @@ class LivePlot:
             for channel in channels:
                 (self.lines[channel],) = axis.plot([], [], label=channel, linewidth=1)
             axis.legend(loc="upper left", ncol=2, fontsize="small")
-        axes[-1].set_xlabel("Seconds before newest board sample")
+        axes[-1].set_xlabel("Seconds before now (shared host clock)")
 
-    def update(self, recorder) -> None:
-        snapshot = recorder.snapshot()
-        newest = recorder.latest_time_s
+    def update(self, recorder, *, now_s: float | None = None) -> None:
+        now_s = time.monotonic() if now_s is None else now_s
+        snapshot = recorder.snapshot(now_s=now_s)
         for axis, (_, channels) in zip(self.axes, PLOTS):
             values = []
             for channel in channels:
                 samples = snapshot[channel]
-                x = [t - newest for t, _ in samples] if newest is not None else []
+                x = [t - now_s for t, _ in samples]
                 y = [value for _, value in samples]
                 self.lines[channel].set_data(x, y)
                 values.extend(y)
@@ -50,4 +52,5 @@ class LivePlot:
         self.figure.suptitle(
             f"Live signals  |  HR {hr} bpm  |  SpO₂ {spo2}%  |  "
             f"frames {stats['frames']}  gaps {stats['sequence_gaps']}  "
-            f"bad CRC {stats['bad_frames']}")
+            f"bad CRC {stats['bad_frames']}  OLED write failures "
+            f"{stats['display_write_failures']}")

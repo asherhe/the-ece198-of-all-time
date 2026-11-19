@@ -35,6 +35,13 @@ leaves DTR deasserted so opening a classic Arduino UNO does not trigger its
 USB-serial auto-reset. Other serial tools may assert DTR and reset the board.
 Recording begins immediately.
 
+## Python live view
+
+`Live/` ports the recorder and analysis to Python. Its Jupyter notebook plots
+raw and filtered ECG, acceleration, and optical signals in a five-second
+rolling window while saving the same session files. See [Live/README.md](Live/README.md)
+for setup and run commands.
+
 ## Wire format, version 1
 
 Every frame is `A5 5A | type:u8 | sequence:u16 | first_sample_micros:u32 |

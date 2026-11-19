@@ -17,6 +17,7 @@ CHANNELS = (
     "diff_raw", "wilson_raw", "diff_filtered", "wilson_filtered",
     "accel_magnitude", "accel_smoothed", "red", "infrared",
 )
+SAMPLE_PERIOD_S = {1: 0.005, 2: 0.020, 3: 0.010}
 
 
 def open_serial(port_name: str) -> Any:
@@ -30,7 +31,7 @@ def open_serial(port_name: str) -> Any:
         ) from exc
     port = serial.Serial(port=None, baudrate=115200, bytesize=8,
                          parity="N", stopbits=1, timeout=0.1,
-                         write_timeout=1, xonxoff=False, rtscts=False,
+                         write_timeout=0.2, xonxoff=False, rtscts=False,
                          dsrdtr=False)
     # UNO R4 Minima's USB CDC write path requires DTR from the host.
     port.dtr = True
@@ -41,7 +42,7 @@ def open_serial(port_name: str) -> Any:
 
 
 class LiveRecorder:
-    """Poll from a serial port and maintain a five-second board-time window.
+    """Poll from a serial port and maintain a five-second host-time plot window.
 
     Call ``poll`` repeatedly. ``port`` can be a serial-like object for tests
     or replay; if omitted, pyserial opens ``port_name`` on entry.
@@ -64,12 +65,13 @@ class LiveRecorder:
         self.motion = AccelerationAnalysis()
         self.pulse = Pulse()
         self.buffers = {name: deque() for name in CHANNELS}
-        self.latest_time_s: float | None = None
+        self._last_plot_time: dict[int, float] = {}
         self.prev_seq: int | None = None
-        self.prev_time: int | None = None
-        self.epoch = 0
+        self._clocks: dict[int, tuple[int, int]] = {}
+        self.latest_board_us = 0
         self.frames = self.gaps = 0
         self.ecg_samples = self.accel_samples = self.optical_samples = 0
+        self.display_write_failures = 0
         self._files = []
         self.started = False
         self.closed = False
@@ -119,48 +121,74 @@ class LiveRecorder:
         writer.writerow(header)
         return writer
 
-    def _unwrap(self, timestamp: int) -> int:
-        if self.prev_time is not None and timestamp < self.prev_time:
-            if self.prev_time - timestamp > 0x80000000:
-                self.epoch += 1 << 32
-            else:
+    def _unwrap(self, timestamp: int, kind: int) -> int:
+        previous, epoch = self._clocks.get(kind, (None, 0))
+        if previous is not None and timestamp < previous:
+            if previous - timestamp > 0x80000000:
+                epoch += 1 << 32
+            elif kind == 1:
                 self.diff.reset()
                 self.wilson.reset()
-                self.clear_window()
+                for name in ("diff_raw", "wilson_raw", "diff_filtered", "wilson_filtered"):
+                    self.buffers[name].clear()
+            elif kind == 2:
+                for name in ("accel_magnitude", "accel_smoothed"):
+                    self.buffers[name].clear()
+            else:
+                for name in ("red", "infrared"):
+                    self.buffers[name].clear()
                 self.pulse.data.clear()
-        self.prev_time = timestamp
-        return self.epoch + timestamp
+        self._clocks[kind] = (timestamp, epoch)
+        unwrapped = epoch + timestamp
+        self.latest_board_us = max(self.latest_board_us, unwrapped)
+        return unwrapped
 
     def clear_window(self) -> None:
         for buffer in self.buffers.values():
             buffer.clear()
-        self.latest_time_s = None
+        self._last_plot_time.clear()
 
-    def _sample(self, channel: str, timestamp_us: int, value: float) -> None:
-        t = timestamp_us / 1e6
-        self.buffers[channel].append((t, value))
-        self.latest_time_s = t if self.latest_time_s is None else max(self.latest_time_s, t)
+    def _sample(self, channel: str, received_s: float, value: float) -> None:
+        self.buffers[channel].append((received_s, value))
 
-    def _trim(self) -> None:
-        if self.latest_time_s is None:
-            return
-        cutoff = self.latest_time_s - self.window_s
+    def _trim(self, now_s: float) -> None:
+        cutoff = now_s - self.window_s
         for buffer in self.buffers.values():
             while buffer and buffer[0][0] < cutoff:
                 buffer.popleft()
 
-    def feed(self, data: bytes) -> None:
+    @staticmethod
+    def _sample_width(frame: Frame) -> int:
+        width = {1: 4, 2: 6, 3: 12}.get(frame.type, 0)
+        return width if frame.count and len(frame.payload) == frame.count * width else 0
+
+    def feed(self, data: bytes, *, received_at: float | None = None) -> None:
         """Decode bytes and process complete frames (also useful for replay)."""
         if not self.started or self.closed:
             raise RuntimeError("recorder is not active")
-        for frame in self.decoder.feed(data):
-            self._frame(frame)
-        self._trim()
+        now_s = time.monotonic() if received_at is None else received_at
+        frames = [frame for frame in self.decoder.feed(data) if self._sample_width(frame)]
+        counts = {kind: sum(frame.count for frame in frames if frame.type == kind)
+                  for kind in SAMPLE_PERIOD_S}
+        plot_times = {}
+        for kind, count in counts.items():
+            if not count:
+                continue
+            previous = self._last_plot_time.get(kind)
+            period = SAMPLE_PERIOD_S[kind]
+            if previous is not None:
+                # A read may contain several frames. Compress their spacing if
+                # necessary so plot times never run ahead of host reception.
+                period = min(period, max(0.0, now_s - previous) / count)
+            first = now_s - (count - 1) * period
+            plot_times[kind] = iter(first + i * period for i in range(count))
+            self._last_plot_time[kind] = now_s
+        for frame in frames:
+            self._frame(frame, plot_times[frame.type])
+        self._trim(now_s)
 
-    def _frame(self, frame: Frame) -> None:
-        width = {1: 4, 2: 6, 3: 12}.get(frame.type)
-        if width is None or not frame.count or len(frame.payload) != frame.count * width:
-            return
+    def _frame(self, frame: Frame, plot_times) -> None:
+        width = self._sample_width(frame)
         if self.prev_seq is not None:
             missed = (frame.sequence - self.prev_seq - 1) & 0xFFFF
             if missed:
@@ -169,9 +197,10 @@ class LiveRecorder:
                 self.wilson.reset()
         self.prev_seq = frame.sequence
         self.frames += 1
-        t0 = self._unwrap(frame.timestamp_us)
+        t0 = self._unwrap(frame.timestamp_us, frame.type)
         for i in range(frame.count):
             payload = frame.payload[i*width:(i+1)*width]
+            plot_time = next(plot_times)
             if frame.type == 1:
                 t = t0 + i*5000
                 diff_raw, wilson_raw = struct.unpack("<HH", payload)
@@ -180,21 +209,21 @@ class LiveRecorder:
                 self._ecg.writerow([t, diff_raw, wilson_raw, diff, wilson])
                 for name, value in (("diff_raw", diff_raw), ("wilson_raw", wilson_raw),
                                     ("diff_filtered", diff), ("wilson_filtered", wilson)):
-                    self._sample(name, t, value)
+                    self._sample(name, plot_time, value)
                 self.ecg_samples += 1
             elif frame.type == 2:
                 t = t0 + i*20000
                 magnitude, smoothed = self.motion.run(*struct.unpack("<hhh", payload))
                 self._accel.writerow([t, magnitude, smoothed])
-                self._sample("accel_magnitude", t, magnitude)
-                self._sample("accel_smoothed", t, smoothed)
+                self._sample("accel_magnitude", plot_time, magnitude)
+                self._sample("accel_smoothed", plot_time, smoothed)
                 self.accel_samples += 1
             else:
                 raw_t, red, infrared = struct.unpack("<III", payload)
-                t = self._unwrap(raw_t)
+                t = self._unwrap(raw_t, frame.type)
                 self.pulse.add(t/1e6, red, infrared)
-                self._sample("red", t, red)
-                self._sample("infrared", t, infrared)
+                self._sample("red", plot_time, red)
+                self._sample("infrared", plot_time, infrared)
                 self.optical_samples += 1
 
     def poll(self) -> None:
@@ -213,10 +242,14 @@ class LiveRecorder:
         payload = struct.pack("<HIB", vitals.bpm, remaining,
                               int(vitals.heart_rate_valid))
         packet = encode_frame(Frame(0x80, 0, 0, 1, payload))
-        if self.port.write(packet) != len(packet):
-            raise OSError("incomplete serial display update")
-        timestamp = self.epoch + self.prev_time if self.prev_time is not None else 0
-        self._vitals.writerow([timestamp, vitals.bpm, int(vitals.heart_rate_valid),
+        # The OLED update is optional. USB CDC can stall on a host-to-board
+        # write even while sensor frames continue arriving in the other direction.
+        try:
+            if self.port.write(packet) != len(packet):
+                self.display_write_failures += 1
+        except OSError:
+            self.display_write_failures += 1
+        self._vitals.writerow([self.latest_board_us, vitals.bpm, int(vitals.heart_rate_valid),
                                vitals.spo2, int(vitals.spo2_valid)])
         for file in self._files:
             file.flush()
@@ -226,13 +259,15 @@ class LiveRecorder:
     def done(self) -> bool:
         return self.started and time.monotonic() - self.start_time >= self.duration_min*60
 
-    def snapshot(self) -> dict[str, list[tuple[float, float]]]:
-        self._trim()
+    def snapshot(self, *, now_s: float | None = None) -> dict[str, list[tuple[float, float]]]:
+        self._trim(time.monotonic() if now_s is None else now_s)
         return {name: list(buffer) for name, buffer in self.buffers.items()}
 
     def stats(self) -> dict[str, int]:
         return {"frames": self.frames, "sequence_gaps": self.gaps,
-                "bad_frames": self.decoder.bad, "ecg_samples": self.ecg_samples,
+                "bad_frames": self.decoder.bad,
+                "display_write_failures": self.display_write_failures,
+                "ecg_samples": self.ecg_samples,
                 "accel_samples": self.accel_samples,
                 "optical_samples": self.optical_samples}
 

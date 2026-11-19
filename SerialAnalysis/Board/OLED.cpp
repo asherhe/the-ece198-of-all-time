@@ -26,6 +26,7 @@ void OLED::begin() {
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
+  draw_frame(bigHeart);
 }
 
 // copied the following from ChatGPT

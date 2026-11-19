@@ -29,6 +29,11 @@ native USB CDC boards such as the UNO R4 Minima to transmit. On some older
 Arduino boards it can reset the sketch once; acquisition starts as the sketch
 restarts.
 
+OLED updates are best effort. If a host-to-board write times out, recording
+continues and `display_write_failures` increases in the plot title and session
+metadata. Restart the notebook kernel, or rerun the setup cell, after changing
+the Python source so the notebook uses the current version.
+
 To record without a notebook:
 
 ```powershell
@@ -36,8 +41,9 @@ python -m SerialAnalysis.Live --port COM3 --output sessions --duration-min 30
 ```
 
 The output folder defaults to `sessions` relative to the notebook kernel's
-working directory or the CLI's working directory. The live window uses board
-microsecond timestamps, so it represents the latest five seconds of acquired
-samples even if serial delivery is uneven. The plot refreshes about five times
-per second. Only the latest five seconds of samples are kept for plotting;
-recording continues for the chosen duration.
+working directory or the CLI's working directory. All plots use the same host
+receive clock, so they scroll together over the latest five seconds. Samples
+within a frame are spaced by their nominal sample period; serial delivery can
+add timing uncertainty. The CSV files retain the board timestamps. The plot
+refreshes about five times per second, and recording continues for the chosen
+duration.
