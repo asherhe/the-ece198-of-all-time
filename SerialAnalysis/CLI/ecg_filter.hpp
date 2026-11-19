@@ -35,16 +35,12 @@ struct EcgFilter {
   size_t cursor = 0;
   bool ready = false;
 
-  // 14-bit ADC rail protection and slew-rate limiting state
-  double adcMax = 16383.0;
-  double railMargin = 160.0;
-  double maxSlewPerSample = 2400.0;
+  double maxSlewPerSample = 250.0;
   double prevCleanRaw = 0.0;
   double dcEstimate = 0.0;
 
-  EcgFilter(double maxAdcCounts = 16383.0) : adcMax(maxAdcCounts) {
-    railMargin = std::max(5.0, adcMax * 0.01);
-    maxSlewPerSample = adcMax * 0.15;
+  EcgFilter(double maxAdcCounts = 1023.0) {
+    maxSlewPerSample = maxAdcCounts * 0.25;
     const double pi = std::acos(-1.0), wc = 2 * pi * 0.5 / 200;
     for (int k = 0; k < 201; ++k) {
       int m = k - 100;
@@ -69,12 +65,7 @@ struct EcgFilter {
       ready = true;
     }
 
-    // Hold last valid value if input saturates at 0 or max ADC rail
-    if (raw <= railMargin || raw >= (adcMax - railMargin)) {
-      raw = prevCleanRaw;
-    }
-
-    // Clamp impossible slew jumps caused by electrode tugs to prevent Gibbs ringing
+    // Only clamp extreme single-sample glitches (>25% full scale in 5ms)
     double delta = raw - prevCleanRaw;
     if (delta > maxSlewPerSample) {
       raw = prevCleanRaw + maxSlewPerSample;
@@ -83,7 +74,7 @@ struct EcgFilter {
     }
     prevCleanRaw = raw;
 
-    // Fast-tracking DC bias removal
+    // Track and subtract DC baseline offset
     dcEstimate += (raw - dcEstimate) * 0.02;
     double centered = raw - dcEstimate;
 
