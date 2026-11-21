@@ -9,6 +9,7 @@ static const uint8_t DISPLAY_TYPE = 0x80;
 static const uint32_t HOST_TIMEOUT_MS = 3000;
 static const uint32_t ECG_PERIOD_US = 5000;    // 200 Hz
 static const uint32_t ACCEL_PERIOD_US = 20000; // 50 Hz
+static const uint32_t OPTICAL_PERIOD_US = 10000; // 100 Hz FIFO service rate
 const int32_t SAMPLE_TIMEOUT = 3000000; // 3 seconds
 MAX30105 optical;
 OLED oled;
@@ -18,6 +19,7 @@ uint16_t txSequence = 0;
 uint32_t dropped[3] = {0, 0, 0};
 uint32_t nextEcg = 0, nextAccel = 0, lastHost = 0;
 uint32_t nextAccelWake = 0;
+uint32_t nextOptical = 0;
 // Keep each complete frame below a typical 64-byte USB CDC write buffer.
 uint8_t ecgData[32], accelData[30], opticalData[48];
 uint8_t ecgCount = 0, accelCount = 0, opticalCount = 0;
@@ -118,7 +120,12 @@ static void sampleOptical() {
     uint32_t t = (idx == 0) ? micros() : (opticalFirst + uint32_t(idx) * 10000UL);
     if (!opticalCount) opticalFirst = t;
     uint8_t *p = opticalData + opticalCount * 12;
-    put32(p, t); put32(p + 4, optical.getRed()); put32(p + 8, optical.getIR());
+    // Use the non-blocking FIFO-tail accessors. getRed()/getIR() call the
+    // library's safeCheck(250), which busy-waits with delay(1) for up to
+    // 250 ms per call and stalls the single-threaded loop (~80 ms per optical
+    // servicing was observed), interrupting serial emission. getFIFORed()/
+    // getFIFOIR() read the already-fetched FIFO sample without any wait.
+    put32(p, t); put32(p + 4, optical.getFIFORed()); put32(p + 8, optical.getFIFOIR());
     optical.nextSample();
     ++idx;
     if (++opticalCount == 4) {
@@ -178,6 +185,7 @@ void setup() {
   const uint32_t startUs = micros();
   nextEcg = startUs;
   nextAccel = startUs;
+  nextOptical = startUs;
 }
 
 void loop() {
@@ -203,7 +211,12 @@ void loop() {
                   ? (nowUs + ACCEL_PERIOD_US)
                   : (nextAccel + ACCEL_PERIOD_US);
   }
-  sampleOptical();
+  if ((int32_t)(nowUs - nextOptical) >= 0) {
+    sampleOptical();
+    nextOptical = ((int32_t)(nowUs - (nextOptical + OPTICAL_PERIOD_US)) >= (int32_t)OPTICAL_PERIOD_US)
+                    ? (nowUs + OPTICAL_PERIOD_US)
+                    : (nextOptical + OPTICAL_PERIOD_US);
+  }
 
   if (oled.connected && millis() - lastHost > HOST_TIMEOUT_MS) {
     oled.connected = false; oled.heart_rate = 0; oled.workout_time = millis();
