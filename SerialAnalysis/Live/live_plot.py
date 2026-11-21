@@ -130,6 +130,58 @@ class LivePlot:
                 ax.set_ylim(y_min - pad, y_max + pad)
 
 
+class VitalsView:
+    """Text readout of BPM/SpO2/reps plus a rolling BPM and SpO2 trend plot."""
+
+    def __init__(self, window_s: float = 300.0, figsize: tuple[float, float] = (10.0, 3.0),
+                 dpi: int = 80) -> None:
+        self.window_s = float(window_s)
+        self.figure, (self.text_ax, self.plot_ax) = plt.subplots(
+            1, 2, figsize=figsize, dpi=dpi, gridspec_kw={"width_ratios": [1, 3]})
+
+        self.text_ax.axis("off")
+        self._readout = self.text_ax.text(
+            0.02, 0.5, "", transform=self.text_ax.transAxes,
+            fontsize=13, va="center", family="monospace")
+
+        self.plot_ax.set_title("Heart rate and SpO\u2082", fontsize=9)
+        self.plot_ax.set_xlabel("Time (s)", fontsize=8)
+        self.plot_ax.set_xlim(-self.window_s, 0.0)
+        self.plot_ax.tick_params(labelsize=8)
+        self.plot_ax.grid(True, alpha=0.25)
+        (self._bpm_line,) = self.plot_ax.plot([], [], lw=1.3, color="tab:red", label="BPM")
+        (self._spo2_line,) = self.plot_ax.plot([], [], lw=1.3, color="tab:blue", label="SpO\u2082 %")
+        self.plot_ax.legend(loc="upper left", fontsize=8)
+
+        self.figure.tight_layout()
+
+    def update(self, recorder: Any, *, now_s: float | None = None) -> None:
+        ref_s = time.monotonic() if now_s is None else now_s
+        v = recorder.vitals_snapshot()
+
+        bpm = v["bpm"]
+        spo2 = v["spo2"]
+        self._readout.set_text(
+            f"BPM:  {bpm if bpm is not None else '--'}\n"
+            f"SpO2: {str(spo2) + '%' if spo2 is not None else '--'}\n"
+            f"Reps: {v['reps']}")
+
+        history = v["history"]
+        bpm_x = [t - ref_s for t, b, _ in history if b is not None]
+        bpm_y = [b for _, b, _ in history if b is not None]
+        spo2_x = [t - ref_s for t, _, s in history if s is not None]
+        spo2_y = [s for _, _, s in history if s is not None]
+        self._bpm_line.set_data(bpm_x, bpm_y)
+        self._spo2_line.set_data(spo2_x, spo2_y)
+
+        self.plot_ax.set_xlim(-self.window_s, 0.0)
+        ys = bpm_y + spo2_y
+        if ys:
+            y_min, y_max = float(min(ys)), float(max(ys))
+            pad = max((y_max - y_min) * 0.08, 2.0)
+            self.plot_ax.set_ylim(y_min - pad, y_max + pad)
+
+
 class BackgroundRecorderRunner:
     """Runs recorder.poll() on a background thread so Jupyter renders stay responsive."""
 
@@ -171,8 +223,14 @@ def run_jupyter_live_plot(
     display_handle: Any,
     *,
     refresh_s: float = 0.5,
+    vitals_view: Any = None,
+    vitals_handle: Any = None,
 ) -> None:
-    """Drive Jupyter display updates while polling serial in the background."""
+    """Drive Jupyter display updates while polling serial in the background.
+
+    If ``vitals_view`` and ``vitals_handle`` are given, the BPM/SpO2/reps
+    readout and trend plot refresh on the same cadence as the signal plot.
+    """
     runner = BackgroundRecorderRunner(recorder, poll_interval_s=0.005)
     runner.start()
     try:
@@ -184,6 +242,9 @@ def run_jupyter_live_plot(
             if now - last_refresh >= refresh_s:
                 plot.update(recorder, now_s=now)
                 display_handle.update(plot.figure)
+                if vitals_view is not None and vitals_handle is not None:
+                    vitals_view.update(recorder, now_s=now)
+                    vitals_handle.update(vitals_view.figure)
                 last_refresh = time.monotonic()
             time.sleep(0.02)
     finally:

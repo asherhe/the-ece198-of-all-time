@@ -13,6 +13,7 @@ import numpy as np
 
 from SerialAnalysis.Live.protocol import Decoder, Frame, crc16, encode_frame
 from SerialAnalysis.Live.recorder import LiveRecorder, open_serial
+from SerialAnalysis.Live.analysis import RepCounter
 
 
 class FakePort:
@@ -331,6 +332,47 @@ class RecorderTests(unittest.TestCase):
                 nan_index = int(np.where(np.isnan(y))[0][0])
                 self.assertGreater(nan_index, 0)
                 self.assertLess(nan_index, y.size - 1)
+
+
+class RepCounterTests(unittest.TestCase):
+    @staticmethod
+    def _rep(rc, t, polarity, amp_g):
+        """Feed one slow push-and-return along x, 20 ms per sample, 1 g on z."""
+        push = polarity * amp_g
+        n = 20  # 400 ms outward, 400 ms return: both exceed MIN_PHASE_MS (220)
+        for i in range(n):
+            rc.run(int(push * 16384 * (i + 1) / n), 0, 16384, t); t += 20
+        for _ in range(10):
+            rc.run(int(push * 16384), 0, 16384, t); t += 20
+        for i in range(n):
+            frac = (i + 1) / n
+            rc.run(int(push * 16384 * (1 - 2 * frac)), 0, 16384, t); t += 20
+        for _ in range(25):  # settle back to rest under threshold*0.35
+            rc.run(0, 0, 16384, t); t += 20
+        return t
+
+    def test_sustained_motion_counts_reps(self):
+        rc = RepCounter()
+        t = 0
+        for _ in range(60):  # warm up filters at rest
+            rc.run(0, 0, 16384, t); t += 20
+        before = rc.rep_count
+        for _ in range(5):
+            t = self._rep(rc, t, 1, 0.5)
+        self.assertGreater(rc.rep_count, before,
+                           "sustained push-and-return reps should be counted")
+
+    def test_quick_twitch_is_not_counted(self):
+        rc = RepCounter()
+        t = 0
+        for _ in range(60):
+            rc.run(0, 0, 16384, t); t += 20
+        # A single 60 ms spike is shorter than MIN_PHASE_MS and must be ignored.
+        for _ in range(3):
+            rc.run(int(0.6 * 16384), 0, 16384, t); t += 20
+        for _ in range(40):
+            rc.run(0, 0, 16384, t); t += 20
+        self.assertEqual(rc.rep_count, 0)
 
 
 if __name__ == "__main__":

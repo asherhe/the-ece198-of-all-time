@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Any
 
-from .analysis import AccelerationAnalysis, EcgFilter, Pulse
+from .analysis import AccelerationAnalysis, EcgFilter, Pulse, RepCounter
 from .protocol import Decoder, Frame, encode_frame
 
 
@@ -51,21 +51,28 @@ class LiveRecorder:
 
     def __init__(self, port_name: str, output: str | Path = "sessions",
                  duration_min: float = 30, *, port: Any = None,
-                 window_s: float = 5.0):
+                 window_s: float = 5.0, vitals_window_s: float = 300.0):
         if duration_min <= 0 or window_s <= 0:
             raise ValueError("duration_min and window_s must be positive")
         self.port_name = port_name
         self.output = Path(output)
         self.duration_min = duration_min
         self.window_s = window_s
+        self.vitals_window_s = vitals_window_s
         self.port = port
         self.owns_port = port is None
         self.decoder = Decoder()
         self.diff = EcgFilter()
         self.wilson = EcgFilter()
         self.motion = AccelerationAnalysis()
+        self.reps = RepCounter()
         self.pulse = Pulse()
         self.buffers = {name: deque() for name in CHANNELS}
+        # Rolling host-time history of per-second vitals for the notebook's
+        # BPM/SpO2 trend plot. Each entry is (host_s, bpm, spo2) with the value
+        # left as None when that reading is not currently valid.
+        self.vitals_history: deque[tuple[float, int | None, int | None]] = deque()
+        self.rep_count = 0
         # Maps unwrapped board microseconds onto host-monotonic seconds so the
         # plot timeline follows the board's own clock instead of host arrival
         # time. Kept per frame type because the sensors can run on independent
@@ -113,7 +120,7 @@ class LiveRecorder:
                                                          "smoothed_m_s2"])
             self._vitals = self._csv("vitals.csv", ["board_us", "heart_rate_bpm",
                                                        "heart_rate_valid", "spo2_percent",
-                                                       "spo2_valid"])
+                                                       "spo2_valid", "rep_count"])
             self.start_time = self.last_display = time.monotonic()
             self.started = True
         except BaseException:
@@ -235,7 +242,9 @@ class LiveRecorder:
             elif frame.type == 2:
                 t = t0 + int(i * SAMPLE_PERIOD_S[2] * 1e6)
                 plot_time = self._plot_time(t, frame.type, now_s)
-                magnitude, smoothed = self.motion.run(*struct.unpack("<hhh", payload))
+                raw_x, raw_y, raw_z = struct.unpack("<hhh", payload)
+                magnitude, smoothed = self.motion.run(raw_x, raw_y, raw_z)
+                self.rep_count = self.reps.run(raw_x, raw_y, raw_z, t // 1000)
                 self._accel.writerow([t, magnitude, smoothed])
                 self._sample("accel_magnitude", plot_time, magnitude)
                 self._sample("accel_smoothed", plot_time, smoothed)
@@ -280,7 +289,16 @@ class LiveRecorder:
         except OSError:
             self.display_write_failures += 1
         self._vitals.writerow([self.latest_board_us, vitals.bpm, int(vitals.heart_rate_valid),
-                               vitals.spo2, int(vitals.spo2_valid)])
+                               vitals.spo2, int(vitals.spo2_valid), self.rep_count])
+        with self._data_lock:
+            self.vitals_history.append((
+                now,
+                vitals.bpm if vitals.heart_rate_valid else None,
+                vitals.spo2 if vitals.spo2_valid else None,
+            ))
+            cutoff = now - self.vitals_window_s
+            while self.vitals_history and self.vitals_history[0][0] < cutoff:
+                self.vitals_history.popleft()
         for file in self._files:
             file.flush()
         self.last_display = now
@@ -295,13 +313,33 @@ class LiveRecorder:
             self._trim(ref_s)
             return {name: list(buffer) for name, buffer in self.buffers.items()}
 
+    def vitals_snapshot(self) -> dict[str, Any]:
+        """Latest vitals readout plus rolling BPM/SpO2 history for plotting.
+
+        ``bpm`` and ``spo2`` are the most recent valid readings (or None if
+        none is valid yet); ``reps`` is the running rep count. ``history`` lists
+        (host_s, bpm, spo2) points with None where a reading was invalid.
+        """
+        vitals = self.pulse.vitals
+        with self._data_lock:
+            history = list(self.vitals_history)
+        last_bpm = next((b for _, b, _ in reversed(history) if b is not None), None)
+        last_spo2 = next((s for _, _, s in reversed(history) if s is not None), None)
+        return {
+            "bpm": last_bpm if last_bpm is not None else (vitals.bpm if vitals.heart_rate_valid else None),
+            "spo2": last_spo2 if last_spo2 is not None else (vitals.spo2 if vitals.spo2_valid else None),
+            "reps": self.rep_count,
+            "history": history,
+        }
+
     def stats(self) -> dict[str, int]:
         return {"frames": self.frames, "sequence_gaps": self.gaps,
                 "bad_frames": self.decoder.bad,
                 "display_write_failures": self.display_write_failures,
                 "ecg_samples": self.ecg_samples,
                 "accel_samples": self.accel_samples,
-                "optical_samples": self.optical_samples}
+                "optical_samples": self.optical_samples,
+                "rep_count": self.rep_count}
 
     def close(self) -> None:
         if self.closed:

@@ -1,11 +1,18 @@
 # Python live recorder
 
 This is a Python port of `SerialAnalysis/CLI`. It decodes the same board frames,
-applies the same ECG, acceleration, and provisional pulse analysis, sends heart
-rate and remaining time to the board once per second, and writes the same four
-session files. The notebook also shows a five-second rolling window of raw and
-filtered ECG, acceleration, and raw optical signals. The pulse and SpO₂
-estimates are prototype measurements, not clinically validated.
+applies the same ECG, acceleration, and provisional pulse analysis, counts
+rehab reps from the accelerometer, sends heart rate and remaining time to the
+board once per second, and writes the same four session files. The notebook
+shows a BPM / SpO₂ / rep-count readout and a rolling heart-rate and SpO₂ trend
+plot above a five-second rolling window of raw and filtered ECG, acceleration,
+and raw optical signals. The pulse and SpO₂ estimates are prototype
+measurements, not clinically validated.
+
+The rep counter is a port of the Arduino rehab sketch: it high-pass filters out
+gravity, limits jerk, low-pass filters tremor, tracks the dominant 3D motion
+direction, and counts a rep after a sustained push and return. `vitals.csv`
+gains a `rep_count` column, and `metadata.json` records the final `rep_count`.
 
 From the repository root:
 
