@@ -6,6 +6,7 @@ import csv
 import json
 from pathlib import Path
 import struct
+import threading
 import time
 from typing import Any
 
@@ -65,7 +66,12 @@ class LiveRecorder:
         self.motion = AccelerationAnalysis()
         self.pulse = Pulse()
         self.buffers = {name: deque() for name in CHANNELS}
-        self._last_plot_time: dict[int, float] = {}
+        # Maps unwrapped board microseconds onto host-monotonic seconds so the
+        # plot timeline follows the board's own clock instead of host arrival
+        # time. Kept per frame type because the sensors can run on independent
+        # clocks (optical has its own); anchored on the first sample of each
+        # type and re-anchored on drift.
+        self._board_to_host_offset: dict[int, float] = {}
         self.prev_seq: int | None = None
         self._clocks: dict[int, tuple[int, int]] = {}
         self.latest_board_us = 0
@@ -75,6 +81,9 @@ class LiveRecorder:
         self._files = []
         self.started = False
         self.closed = False
+        self._data_lock = threading.Lock()
+        self._io_lock = threading.Lock()
+        self._prev_seq_by_type: dict[int, int] = {}
 
     def __enter__(self) -> "LiveRecorder":
         self.start()
@@ -146,7 +155,7 @@ class LiveRecorder:
     def clear_window(self) -> None:
         for buffer in self.buffers.values():
             buffer.clear()
-        self._last_plot_time.clear()
+        self._board_to_host_offset.clear()
 
     def _sample(self, channel: str, received_s: float, value: float) -> None:
         self.buffers[channel].append((received_s, value))
@@ -162,47 +171,59 @@ class LiveRecorder:
         width = {1: 4, 2: 6, 3: 12}.get(frame.type, 0)
         return width if frame.count and len(frame.payload) == frame.count * width else 0
 
+    def _plot_time(self, board_us: int, kind: int, now_s: float) -> float:
+        """Map an unwrapped board timestamp (microseconds) to host-monotonic
+        seconds for the given frame type. Anchor per type on first use and
+        re-anchor on drift so the newest sample stays near ``now_s`` and the
+        5-second window math holds."""
+        board_s = board_us / 1e6
+        offset = self._board_to_host_offset.get(kind)
+        if offset is None:
+            offset = self._board_to_host_offset[kind] = now_s - board_s
+        plot_time = board_s + offset
+        # Re-anchor if this type's board clock has drifted ahead of host time or
+        # fallen behind by more than the plot window; keeps the newest sample
+        # near now so the rolling window keeps showing live data.
+        if plot_time > now_s + 0.05 or plot_time < now_s - self.window_s:
+            offset = self._board_to_host_offset[kind] = now_s - board_s
+            plot_time = now_s
+        return plot_time
+
     def feed(self, data: bytes, *, received_at: float | None = None) -> None:
         """Decode bytes and process complete frames (also useful for replay)."""
         if not self.started or self.closed:
             raise RuntimeError("recorder is not active")
         now_s = time.monotonic() if received_at is None else received_at
         frames = [frame for frame in self.decoder.feed(data) if self._sample_width(frame)]
-        counts = {kind: sum(frame.count for frame in frames if frame.type == kind)
-                  for kind in SAMPLE_PERIOD_S}
-        plot_times = {}
-        for kind, count in counts.items():
-            if not count:
-                continue
-            previous = self._last_plot_time.get(kind)
-            period = SAMPLE_PERIOD_S[kind]
-            if previous is not None:
-                # A read may contain several frames. Compress their spacing if
-                # necessary so plot times never run ahead of host reception.
-                period = min(period, max(0.0, now_s - previous) / count)
-            first = now_s - (count - 1) * period
-            plot_times[kind] = iter(first + i * period for i in range(count))
-            self._last_plot_time[kind] = now_s
-        for frame in frames:
-            self._frame(frame, plot_times[frame.type])
-        self._trim(now_s)
+        if not frames:
+            with self._data_lock:
+                self._trim(now_s)
+            return
 
-    def _frame(self, frame: Frame, plot_times) -> None:
+        with self._data_lock:
+            for frame in frames:
+                self._frame(frame, now_s)
+            self._trim(now_s)
+
+    def _frame(self, frame: Frame, now_s: float) -> None:
         width = self._sample_width(frame)
-        if self.prev_seq is not None:
-            missed = (frame.sequence - self.prev_seq - 1) & 0xFFFF
+        prev_seq = self._prev_seq_by_type.get(frame.type)
+        if prev_seq is not None:
+            missed = (frame.sequence - prev_seq - 1) & 0xFFFF
             if missed:
                 self.gaps += missed
-                self.diff.reset()
-                self.wilson.reset()
+                if frame.type == 1:
+                    self.diff.reset()
+                    self.wilson.reset()
+        self._prev_seq_by_type[frame.type] = frame.sequence
         self.prev_seq = frame.sequence
         self.frames += 1
         t0 = self._unwrap(frame.timestamp_us, frame.type)
         for i in range(frame.count):
             payload = frame.payload[i*width:(i+1)*width]
-            plot_time = next(plot_times)
             if frame.type == 1:
-                t = t0 + i*5000
+                t = t0 + int(i * SAMPLE_PERIOD_S[1] * 1e6)
+                plot_time = self._plot_time(t, frame.type, now_s)
                 diff_raw, wilson_raw = struct.unpack("<HH", payload)
                 diff = self.diff.run(diff_raw)
                 wilson = self.wilson.run(wilson_raw)
@@ -212,7 +233,8 @@ class LiveRecorder:
                     self._sample(name, plot_time, value)
                 self.ecg_samples += 1
             elif frame.type == 2:
-                t = t0 + i*20000
+                t = t0 + int(i * SAMPLE_PERIOD_S[2] * 1e6)
+                plot_time = self._plot_time(t, frame.type, now_s)
                 magnitude, smoothed = self.motion.run(*struct.unpack("<hhh", payload))
                 self._accel.writerow([t, magnitude, smoothed])
                 self._sample("accel_magnitude", plot_time, magnitude)
@@ -220,7 +242,10 @@ class LiveRecorder:
                 self.accel_samples += 1
             else:
                 raw_t, red, infrared = struct.unpack("<III", payload)
+                # Unwrap the optical clock once; reuse it for both the pulse
+                # analysis buffer and the plot sample time.
                 t = self._unwrap(raw_t, frame.type)
+                plot_time = self._plot_time(t, frame.type, now_s)
                 self.pulse.add(t/1e6, red, infrared)
                 self._sample("red", plot_time, red)
                 self._sample("infrared", plot_time, infrared)
@@ -229,7 +254,8 @@ class LiveRecorder:
     def poll(self) -> None:
         if not self.started or self.closed:
             raise RuntimeError("recorder is not active")
-        data = self.port.read(1024)
+        with self._io_lock:
+            data = self.port.read(1024)
         if data:
             self.feed(data)
         now = time.monotonic()
@@ -244,8 +270,12 @@ class LiveRecorder:
         packet = encode_frame(Frame(0x80, 0, 0, 1, payload))
         # The OLED update is optional. USB CDC can stall on a host-to-board
         # write even while sensor frames continue arriving in the other direction.
+        # Hold the IO lock only around the write itself so a slow host-to-board
+        # write cannot block the read path in poll() for up to a second.
         try:
-            if self.port.write(packet) != len(packet):
+            with self._io_lock:
+                written = self.port.write(packet)
+            if written != len(packet):
                 self.display_write_failures += 1
         except OSError:
             self.display_write_failures += 1
@@ -260,8 +290,10 @@ class LiveRecorder:
         return self.started and time.monotonic() - self.start_time >= self.duration_min*60
 
     def snapshot(self, *, now_s: float | None = None) -> dict[str, list[tuple[float, float]]]:
-        self._trim(time.monotonic() if now_s is None else now_s)
-        return {name: list(buffer) for name, buffer in self.buffers.items()}
+        ref_s = time.monotonic() if now_s is None else now_s
+        with self._data_lock:
+            self._trim(ref_s)
+            return {name: list(buffer) for name, buffer in self.buffers.items()}
 
     def stats(self) -> dict[str, int]:
         return {"frames": self.frames, "sequence_gaps": self.gaps,

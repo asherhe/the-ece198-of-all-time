@@ -1,0 +1,13 @@
+{
+  "protocol_version": 1,
+  "started_utc": "2026-11-21T00:09:52Z",
+  "port": "COM8",
+  "duration_minutes": 30,
+  "frames": 738,
+  "sequence_gaps": 1351,
+  "bad_frames": 0,
+  "display_write_failures": 0,
+  "ecg_samples": 2712,
+  "accel_samples": 650,
+  "optical_samples": 1076
+}

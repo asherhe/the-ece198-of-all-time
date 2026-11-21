@@ -7,6 +7,9 @@
 static const uint8_t ECG_TYPE = 1, ACCEL_TYPE = 2, OPTICAL_TYPE = 3;
 static const uint8_t DISPLAY_TYPE = 0x80;
 static const uint32_t HOST_TIMEOUT_MS = 3000;
+static const uint32_t ECG_PERIOD_US = 5000;    // 200 Hz
+static const uint32_t ACCEL_PERIOD_US = 20000; // 50 Hz
+const int32_t SAMPLE_TIMEOUT = 3000000; // 3 seconds
 MAX30105 optical;
 OLED oled;
 bool opticalReady = false;
@@ -34,17 +37,21 @@ static uint16_t crc16(const uint8_t *p, size_t n) {
   return crc;
 }
 static void sendFrame(uint8_t type, uint32_t time, uint8_t count, const uint8_t *payload, uint16_t len) {
+  const size_t size = 14 + len;
+  if (Serial.availableForWrite() < (int)size) {
+    if (type >= ECG_TYPE && type <= OPTICAL_TYPE) dropped[type - 1] += count;
+    return;
+  }
   uint8_t frame[134];
+  const uint16_t seq = txSequence++;
   frame[0] = 0xa5; frame[1] = 0x5a; frame[2] = type;
-  put16(frame + 3, txSequence++);
+  put16(frame + 3, seq);
   put32(frame + 5, time);
   frame[9] = count;
   put16(frame + 10, len);
   memcpy(frame + 12, payload, len);
   put16(frame + 12 + len, crc16(frame + 2, 10 + len));
-  const size_t size = 14 + len;
-  if (Serial.availableForWrite() >= (int)size) Serial.write(frame, size);
-  else if (type >= ECG_TYPE && type <= OPTICAL_TYPE) dropped[type - 1] += count;
+  Serial.write(frame, size);
 }
 static void flushEcg() { if (ecgCount) { sendFrame(ECG_TYPE, ecgFirst, ecgCount, ecgData, ecgCount * 4); ecgCount = 0; } }
 static void flushAccel() { if (accelCount) { sendFrame(ACCEL_TYPE, accelFirst, accelCount, accelData, accelCount * 6); accelCount = 0; } }
@@ -106,13 +113,18 @@ static void sampleAccel(uint32_t t) {
 static void sampleOptical() {
   if (!opticalReady) return;
   optical.check();
+  uint8_t idx = 0;
   while (optical.available()) {
-    uint32_t t = micros();
+    uint32_t t = (idx == 0) ? micros() : (opticalFirst + uint32_t(idx) * 10000UL);
     if (!opticalCount) opticalFirst = t;
     uint8_t *p = opticalData + opticalCount * 12;
     put32(p, t); put32(p + 4, optical.getRed()); put32(p + 8, optical.getIR());
     optical.nextSample();
-    if (++opticalCount == 4) flushOptical();
+    ++idx;
+    if (++opticalCount == 4) {
+      flushOptical();
+      idx = 0;
+    }
   }
 }
 
@@ -163,20 +175,36 @@ void setup() {
   oled.heart_rate = 0; oled.workout_time = 0; oled.begin();
 
   // setup timers
-  nextEcg = nextAccel = micros();
+  const uint32_t startUs = micros();
+  nextEcg = startUs;
+  nextAccel = startUs;
 }
 
 void loop() {
   receiveDisplay();
-  if (!opticalReady && (int32_t)(millis() - nextOpticalRetry) >= 0) {
+
+  const uint32_t nowMs = millis();
+  if (!opticalReady && (int32_t)(nowMs - nextOpticalRetry) >= 0) {
     opticalReady = optical.begin(Wire, I2C_SPEED_FAST);
     if (opticalReady) optical.setup(60, 2, 2, 100, 118, 4096);
-    else nextOpticalRetry = millis() + 1000;
+    else nextOpticalRetry = nowMs + 1000;
   }
-  uint32_t now = micros();
-  if ((int32_t)(now - nextEcg) >= 0) { sampleEcg(nextEcg); nextEcg += 5000; }
-  if ((int32_t)(now - nextAccel) >= 0) { sampleAccel(nextAccel); nextAccel += 20000; }
+
+  const uint32_t nowUs = micros();
+  if ((int32_t)(nowUs - nextEcg) >= 0) {
+    sampleEcg(nowUs);
+    nextEcg = ((int32_t)(nowUs - (nextEcg + ECG_PERIOD_US)) >= (int32_t)ECG_PERIOD_US)
+                ? (nowUs + ECG_PERIOD_US)
+                : (nextEcg + ECG_PERIOD_US);
+  }
+  if ((int32_t)(nowUs - nextAccel) >= 0) {
+    sampleAccel(nowUs);
+    nextAccel = ((int32_t)(nowUs - (nextAccel + ACCEL_PERIOD_US)) >= (int32_t)ACCEL_PERIOD_US)
+                  ? (nowUs + ACCEL_PERIOD_US)
+                  : (nextAccel + ACCEL_PERIOD_US);
+  }
   sampleOptical();
+
   if (oled.connected && millis() - lastHost > HOST_TIMEOUT_MS) {
     oled.connected = false; oled.heart_rate = 0; oled.workout_time = millis();
   }

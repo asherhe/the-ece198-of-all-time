@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 from SerialAnalysis.Live.protocol import Decoder, Frame, crc16, encode_frame
 from SerialAnalysis.Live.recorder import LiveRecorder, open_serial
 
@@ -70,6 +72,91 @@ class RecorderTests(unittest.TestCase):
             with (session / "vitals.csv").open(newline="") as file:
                 self.assertEqual(len(list(csv.DictReader(file))), 1)
 
+    def test_optical_stream_is_continuous_and_fills_window(self):
+        # At the real 100 Hz optical rate the plot line must be continuous
+        # (no interior NaN breaks) and the five-second window must retain the
+        # whole run, not just the most recent sample.
+        from SerialAnalysis.Live.live_plot import build_gapped_xy, CHANNEL_SPECS
+
+        with tempfile.TemporaryDirectory() as directory:
+            with LiveRecorder("FAKE", directory, port=FakePort()) as recorder:
+                seq = 0
+                base_us = 2_000_000
+                now = 200.0
+                # 2 seconds of optical samples, 10 ms apart, batched 4 per frame.
+                sample = 0
+                total = 200
+                while sample < total:
+                    payload = b""
+                    for _ in range(4):
+                        t_us = base_us + sample * 10_000
+                        payload += struct.pack("<III", t_us, 90_000 + sample,
+                                               100_000 + sample)
+                        sample += 1
+                    first_us = base_us + (sample - 4) * 10_000
+                    recorder.feed(encode_frame(Frame(3, seq & 0xFFFF, first_us, 4, payload)),
+                                  received_at=now)
+                    seq += 1
+                    now += 0.04
+                snap = recorder.snapshot(now_s=now)
+                red = snap["red"]
+                # A five-second window at 100 Hz holds far more than one point.
+                self.assertGreater(len(red), 100)
+
+                _, expected_dt, gap_factor = CHANNEL_SPECS["red"]
+                x, y = build_gapped_xy(red, now_s=now, window_s=5.0,
+                                       expected_dt_s=expected_dt, gap_factor=gap_factor)
+                self.assertGreater(x.size, 100)
+                self.assertFalse(np.isnan(y).any(),
+                                 "optical line should have no interior gap breaks")
+        # The per-second display update must not hold the serial IO lock while
+        # flushing CSV files; otherwise the read path in poll() stalls ~1 Hz.
+        import threading
+
+        class LockSpy:
+            def __init__(self):
+                self._lock = threading.Lock()
+                self.held = False
+
+            def __enter__(self):
+                self._lock.acquire()
+                self.held = True
+                return self
+
+            def __exit__(self, *exc):
+                self.held = False
+                self._lock.release()
+
+        flushed_while_locked = []
+
+        class FlushSpyPort(FakePort):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            with LiveRecorder("FAKE", directory, port=FlushSpyPort()) as recorder:
+                spy = LockSpy()
+                recorder._io_lock = spy
+                real_files = recorder._files
+
+                class SpyFile:
+                    def __init__(self, inner):
+                        self._inner = inner
+
+                    def flush(self):
+                        flushed_while_locked.append(spy.held)
+                        return self._inner.flush()
+
+                    def __getattr__(self, name):
+                        return getattr(self._inner, name)
+
+                recorder._files = [SpyFile(f) for f in real_files]
+                recorder._display_update(recorder.start_time + 1.1)
+                recorder._files = real_files
+
+            self.assertTrue(flushed_while_locked)
+            self.assertFalse(any(flushed_while_locked),
+                             "CSV flush must not run while the IO lock is held")
+
     def test_csv_timing_window_and_display_packet(self):
         with tempfile.TemporaryDirectory() as directory:
             port = FakePort()
@@ -80,7 +167,9 @@ class RecorderTests(unittest.TestCase):
                     struct.pack("<hhh", 0, 0, 16384))), received_at=100.1)
                 recorder.feed(encode_frame(Frame(3, 3, 1_040_000, 1,
                     struct.pack("<III", 1_040_000, 10000, 12000))), received_at=100.2)
-                self.assertEqual(recorder.gaps, 1)
+                # Sequence gaps are tracked per frame type; each type here sees
+                # only its first frame, so there is no within-type gap.
+                self.assertEqual(recorder.gaps, 0)
                 self.assertEqual(len(recorder.snapshot(now_s=100.2)["diff_raw"]), 2)
                 self.assertEqual(len(recorder.snapshot(now_s=100.2)["red"]), 1)
                 recorder._display_update(recorder.start_time + 1.1)
@@ -100,7 +189,8 @@ class RecorderTests(unittest.TestCase):
                 accel = list(csv.DictReader(file))
             self.assertAlmostEqual(float(accel[0]["magnitude_m_s2"]), 9.81)
             metadata = json.loads((session / "metadata.json").read_text())
-            self.assertEqual(metadata["sequence_gaps"], 1)
+            # The final ECG frame jumps seq 0 -> 4, a within-type gap of 3.
+            self.assertEqual(metadata["sequence_gaps"], 3)
             self.assertEqual(metadata["frames"], 4)
 
     def test_timestamp_rollover_is_unwrapped(self):
@@ -117,6 +207,9 @@ class RecorderTests(unittest.TestCase):
             self.assertEqual(times[1] - times[0], 0x2000)
 
     def test_skewed_sensor_clocks_keep_five_second_plot_windows(self):
+        # ECG and acceleration are reported on independent board clocks here
+        # (1 MHz-ish vs 10 MHz-ish base). A per-type board->host mapping must
+        # keep each channel's samples inside the rolling five-second window.
         with tempfile.TemporaryDirectory() as directory:
             with LiveRecorder("FAKE", directory, port=FakePort()) as recorder:
                 recorder.feed(encode_frame(Frame(1, 0, 1_000_000, 1,
@@ -130,6 +223,10 @@ class RecorderTests(unittest.TestCase):
                 snapshot = recorder.snapshot(now_s=102)
                 self.assertEqual(len(snapshot["diff_raw"]), 2)
                 self.assertEqual(len(snapshot["accel_magnitude"]), 2)
+                # Each channel's newest sample is mapped near its latest host
+                # arrival time, regardless of the raw board clock scale.
+                self.assertAlmostEqual(snapshot["diff_raw"][-1][0], 100.5)
+                self.assertAlmostEqual(snapshot["accel_magnitude"][-1][0], 101.5)
 
                 try:
                     from matplotlib import pyplot as plt
@@ -140,17 +237,26 @@ class RecorderTests(unittest.TestCase):
                 plot = LivePlot()
                 try:
                     plot.update(recorder, now_s=102)
-                    self.assertEqual(tuple(plot.axes[0].get_xlim()), (-5.0, 0.0))
-                    self.assertEqual(list(plot.lines["diff_raw"].get_xdata()),
-                                     [-2.0, -1.0])
-                    self.assertEqual(list(plot.lines["accel_magnitude"].get_xdata()),
-                                     [-1.5, -0.5])
+                    first_ax = plot.axes[plot.channels[0]]
+                    self.assertEqual(tuple(first_ax.get_xlim()), (-5.0, 0.0))
+                    # The real sample x-values (where y is finite) are the
+                    # board-derived times expressed relative to now_s=102.
+                    # Samples 0.5 s apart exceed the gap threshold, so a NaN
+                    # break separates them; ignore those break points here.
+                    def real_x(channel: str) -> list[float]:
+                        line = plot.lines[channel]
+                        xs = line.get_xdata()
+                        ys = line.get_ydata()
+                        return [float(x) for x, y in zip(xs, ys) if np.isfinite(y)]
+
+                    self.assertEqual(real_x("diff_raw"), [-2.0, -1.5])
+                    self.assertEqual(real_x("accel_magnitude"), [-1.5, -0.5])
                     self.assertEqual(len(recorder.snapshot(now_s=106.6)["diff_raw"]), 0)
                     self.assertEqual(len(recorder.snapshot(now_s=106.6)["accel_magnitude"]), 0)
                 finally:
                     plt.close(plot.figure)
 
-    def test_batched_frames_get_ordered_host_plot_times(self):
+    def test_batched_frames_get_board_derived_plot_times(self):
         with tempfile.TemporaryDirectory() as directory:
             with LiveRecorder("FAKE", directory, port=FakePort()) as recorder:
                 first = encode_frame(Frame(1, 0, 1_000_000, 2,
@@ -161,10 +267,70 @@ class RecorderTests(unittest.TestCase):
                     struct.pack("<HHHH", 8230, 9040, 8240, 9050)))
                 recorder.feed(first + second, received_at=100)
                 recorder.feed(third, received_at=100.001)
-                times = [t for t, _ in recorder.snapshot(now_s=100.001)["diff_raw"]]
+                times = [t for t, _ in recorder.snapshot(now_s=100.030)["diff_raw"]]
                 self.assertEqual(len(times), 6)
+                # Plot times follow the board clock: anchored so the first
+                # sample lands at the first host arrival, then spaced by the
+                # real 5 ms board period, not squashed into a ~2 ms sliver.
                 self.assertTrue(all(a < b for a, b in zip(times, times[1:])))
-                self.assertAlmostEqual(times[-1], 100.001)
+                for a, b in zip(times, times[1:]):
+                    self.assertAlmostEqual(b - a, 0.005)
+                self.assertAlmostEqual(times[0], 100.0)
+                self.assertAlmostEqual(times[-1], 100.025)
+
+    def test_replayed_stream_is_continuous_except_at_injected_gap(self):
+        # Replay several seconds of ECG+accel+optical on board clocks with one
+        # deliberately dropped second of ECG. The ECG plot must be continuous
+        # everywhere except a single break at the injected gap.
+        from SerialAnalysis.Live.live_plot import build_gapped_xy, CHANNEL_SPECS
+
+        with tempfile.TemporaryDirectory() as directory:
+            with LiveRecorder("FAKE", directory, port=FakePort()) as recorder:
+                ecg_seq = accel_seq = opt_seq = 0
+                ecg_us = accel_us = opt_us = 0
+                now = 300.0
+                # 4 seconds of data; ECG at 200 Hz (8/frame), gap during [2s,3s).
+                for frame_idx in range(200):  # 200 * 20 ms = 4 s of wall time
+                    block_start_s = frame_idx * 0.02
+                    in_gap = 2.0 <= block_start_s < 3.0
+
+                    if not in_gap:
+                        payload = b""
+                        for _ in range(4):
+                            payload += struct.pack("<HH", 8192, 9000)
+                            ecg_us += 5000
+                        recorder.feed(encode_frame(Frame(1, ecg_seq & 0xFFFF,
+                            ecg_us - 4 * 5000, 4, payload)), received_at=now)
+                        ecg_seq += 1
+                    else:
+                        # Keep the board clock advancing through the gap so the
+                        # resumed samples land at their true (later) time.
+                        ecg_us += 4 * 5000
+
+                    # Accel every other frame (50 Hz, 1/frame here).
+                    if frame_idx % 1 == 0:
+                        recorder.feed(encode_frame(Frame(2, accel_seq & 0xFFFF,
+                            accel_us, 1, struct.pack("<hhh", 0, 0, 16384))),
+                            received_at=now)
+                        accel_seq += 1
+                        accel_us += 20000
+
+                    now += 0.02
+
+                final_now = now
+                snap = recorder.snapshot(now_s=final_now)
+                # The five-second window ends at 4 s of data; the gap sat at
+                # [2s,3s), i.e. 1-2 s before the end, so it is inside the window.
+                _, expected_dt, gap_factor = CHANNEL_SPECS["diff_raw"]
+                x, y = build_gapped_xy(snap["diff_raw"], now_s=final_now, window_s=5.0,
+                                       expected_dt_s=expected_dt, gap_factor=gap_factor)
+                nan_breaks = int(np.isnan(y).sum())
+                self.assertEqual(nan_breaks, 1,
+                                 "exactly one break expected, at the injected gap")
+                # Data exists on both sides of the break.
+                nan_index = int(np.where(np.isnan(y))[0][0])
+                self.assertGreater(nan_index, 0)
+                self.assertLess(nan_index, y.size - 1)
 
 
 if __name__ == "__main__":
