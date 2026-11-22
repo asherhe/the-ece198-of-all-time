@@ -30,31 +30,40 @@ void OLED::begin() {
 
 // copied the following from ChatGPT
 
-void OLED::loop() {
-  unsigned long currentMillis = millis();
+// Send one short I2C transaction per loop instead of blocking for a full
+// 1024-byte framebuffer. Each chunk sets its own page and column address.
+void OLED::sendDisplayChunk() {
+  if (!displayPending) return;
+  const uint8_t page = displayOffset / SCREEN_WIDTH;
+  const uint8_t column = displayOffset % SCREEN_WIDTH;
+  Wire.beginTransmission(0x3c);
+  Wire.write((uint8_t)0x00);
+  Wire.write((uint8_t)0x21); Wire.write(column); Wire.write(column + 15);
+  Wire.write((uint8_t)0x22); Wire.write(page); Wire.write(page);
+  Wire.endTransmission();
+  Wire.beginTransmission(0x3c); Wire.write((uint8_t)0x40);
+  Wire.write(display.getBuffer() + displayOffset, 16);
+  Wire.endTransmission();
+  displayOffset += 16;
+  if (displayOffset == SCREEN_WIDTH * SCREEN_HEIGHT / 8) displayPending = false;
+}
 
-  // Update clock every second
+void OLED::loop() {
+  if (displayPending) { sendDisplayChunk(); return; }
+  unsigned long currentMillis = millis();
+  bool redraw = false;
   if (currentMillis - previousTimeUpdate >= 1000) {
     previousTimeUpdate = currentMillis;
-    draw_frame(bigHeart);
+    redraw = true;
   }
-
-  // Animate heart independently and according to heart_rate
-  unsigned long heartInterval;
-  if (heart_rate == 0) {
-    heartInterval = 1000;
-  } else if (bigHeart) {
-    heartInterval = (1600UL * 25UL) / heart_rate;
-  } else {
-    heartInterval = (800UL * 25UL) / heart_rate;
-  }
-
+  unsigned long heartInterval = heart_rate == 0 ? 1000 :
+      (bigHeart ? (1600UL * 25UL) : (800UL * 25UL)) / heart_rate;
   if (currentMillis - previousHeartUpdate >= heartInterval) {
     previousHeartUpdate = currentMillis;
     bigHeart = !bigHeart;
-
-    draw_frame(bigHeart);
+    redraw = true;
   }
+  if (redraw) draw_frame(bigHeart);
 }
 
 // copying ends
@@ -70,7 +79,8 @@ void OLED::draw_frame(bool big_or_small) {
   if (!connected && ((millis() / 500) & 1))
     display.fillRect(120, 0, 8, 8, SSD1306_WHITE);
 
-  display.display();
+  displayOffset = 0;
+  displayPending = true;
 }
 
 void OLED::update_bpm() {

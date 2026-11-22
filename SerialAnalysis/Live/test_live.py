@@ -168,9 +168,8 @@ class RecorderTests(unittest.TestCase):
                     struct.pack("<hhh", 0, 0, 16384))), received_at=100.1)
                 recorder.feed(encode_frame(Frame(3, 3, 1_040_000, 1,
                     struct.pack("<III", 1_040_000, 10000, 12000))), received_at=100.2)
-                # Sequence gaps are tracked per frame type; each type here sees
-                # only its first frame, so there is no within-type gap.
-                self.assertEqual(recorder.gaps, 0)
+                # The board uses one sequence across all frame types.
+                self.assertEqual(recorder.gaps, 1)
                 self.assertEqual(len(recorder.snapshot(now_s=100.2)["diff_raw"]), 2)
                 self.assertEqual(len(recorder.snapshot(now_s=100.2)["red"]), 1)
                 recorder._display_update(recorder.start_time + 1.1)
@@ -190,9 +189,42 @@ class RecorderTests(unittest.TestCase):
                 accel = list(csv.DictReader(file))
             self.assertAlmostEqual(float(accel[0]["magnitude_m_s2"]), 9.81)
             metadata = json.loads((session / "metadata.json").read_text())
-            # The final ECG frame jumps seq 0 -> 4, a within-type gap of 3.
-            self.assertEqual(metadata["sequence_gaps"], 3)
+            self.assertEqual(metadata["sequence_gaps"], 1)
             self.assertEqual(metadata["frames"], 4)
+
+    def test_interleaved_sequences_and_sample_gaps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with LiveRecorder("FAKE", directory, port=FakePort()) as recorder:
+                ecg = struct.pack("<HH", 8192, 9000)
+                accel = struct.pack("<hhh", 0, 0, 16384)
+                recorder.feed(encode_frame(Frame(1, 65534, 1000000, 1, ecg)), received_at=100)
+                recorder.feed(encode_frame(Frame(2, 65535, 1000000, 1, accel)), received_at=100)
+                recorder.feed(encode_frame(Frame(1, 0, 1005000, 1, ecg)), received_at=100.005)
+                self.assertEqual(recorder.gaps, 0)
+                recorder.feed(encode_frame(Frame(1, 2, 1020000, 1, ecg)), received_at=100.020)
+                self.assertEqual(recorder.gaps, 1)
+                self.assertEqual(recorder.estimated_missing_samples[1], 2)
+                self.assertEqual(recorder.timestamp_discontinuities[1], 1)
+
+    def test_optical_batches_and_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with LiveRecorder("FAKE", directory, port=FakePort()) as recorder:
+                for seq, timestamps in enumerate(([0xffffd8f0, 0xfffffff0], [0x2700, 0x4e10])):
+                    payload = b"".join(struct.pack("<III", t, 90000, 100000) for t in timestamps)
+                    recorder.feed(encode_frame(Frame(3, seq, timestamps[0], 2, payload)), received_at=100 + seq * .02)
+                self.assertEqual(recorder.timestamp_discontinuities[3], 0)
+                self.assertEqual(len(recorder.snapshot(now_s=100.04)["red"]), 4)
+                diag = struct.pack("<10I", *range(10))
+                recorder.feed(encode_frame(Frame(4, 2, 0, 1, diag)), received_at=100.04)
+                self.assertEqual(recorder.board_diagnostics["i2c_errors"], 2)
+                self.assertEqual(recorder.gaps, 0)
+
+    def test_plot_breaks_for_one_missing_sample(self):
+        from SerialAnalysis.Live.live_plot import build_gapped_xy, CHANNEL_SPECS
+        _, expected, factor = CHANNEL_SPECS["diff_raw"]
+        _, y = build_gapped_xy([(100.0, 1), (100.005, 2), (100.015, 3)],
+                               now_s=100.02, expected_dt_s=expected, gap_factor=factor)
+        self.assertEqual(int(np.isnan(y).sum()), 1)
 
     def test_timestamp_rollover_is_unwrapped(self):
         with tempfile.TemporaryDirectory() as directory:

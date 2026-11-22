@@ -90,7 +90,10 @@ class LiveRecorder:
         self.closed = False
         self._data_lock = threading.Lock()
         self._io_lock = threading.Lock()
-        self._prev_seq_by_type: dict[int, int] = {}
+        self._last_sample_us: dict[int, int] = {}
+        self.timestamp_discontinuities = {1: 0, 2: 0, 3: 0}
+        self.estimated_missing_samples = {1: 0, 2: 0, 3: 0}
+        self.board_diagnostics: dict[str, int] = {}
 
     def __enter__(self) -> "LiveRecorder":
         self.start()
@@ -201,7 +204,7 @@ class LiveRecorder:
         if not self.started or self.closed:
             raise RuntimeError("recorder is not active")
         now_s = time.monotonic() if received_at is None else received_at
-        frames = [frame for frame in self.decoder.feed(data) if self._sample_width(frame)]
+        frames = self.decoder.feed(data)
         if not frames:
             with self._data_lock:
                 self._trim(now_s)
@@ -213,23 +216,33 @@ class LiveRecorder:
             self._trim(now_s)
 
     def _frame(self, frame: Frame, now_s: float) -> None:
-        width = self._sample_width(frame)
-        prev_seq = self._prev_seq_by_type.get(frame.type)
-        if prev_seq is not None:
-            missed = (frame.sequence - prev_seq - 1) & 0xFFFF
-            if missed:
+        if self.prev_seq is not None:
+            missed = (frame.sequence - self.prev_seq - 1) & 0xFFFF
+            # Ignore duplicates/backward jumps rather than treating them as 65535 losses.
+            if missed < 0x8000:
                 self.gaps += missed
-                if frame.type == 1:
-                    self.diff.reset()
-                    self.wilson.reset()
-        self._prev_seq_by_type[frame.type] = frame.sequence
         self.prev_seq = frame.sequence
         self.frames += 1
-        t0 = self._unwrap(frame.timestamp_us, frame.type)
+        if frame.type == 4:
+            if frame.count == 1 and len(frame.payload) in (40, 44, 48):
+                names = ("missed_ecg_deadlines", "missed_accel_deadlines", "i2c_errors",
+                         "optical_fifo_overflows", "tx_dropped_ecg", "tx_dropped_accel",
+                         "tx_dropped_optical", "max_loop_us", "max_optical_us", "optical_ready")
+                self.board_diagnostics = dict(zip(names, struct.unpack("<10I", frame.payload[:40])))
+                if len(frame.payload) >= 44:
+                    self.board_diagnostics["optical_fifo_state"] = struct.unpack_from("<I", frame.payload, 40)[0]
+                if len(frame.payload) >= 48:
+                    self.board_diagnostics["optical_overflow_counter_reliable"] = struct.unpack_from("<I", frame.payload, 44)[0]
+            return
+        width = self._sample_width(frame)
+        if not width:
+            return
+        t0 = self._unwrap(frame.timestamp_us, frame.type) if frame.type != 3 else 0
         for i in range(frame.count):
             payload = frame.payload[i*width:(i+1)*width]
             if frame.type == 1:
                 t = t0 + int(i * SAMPLE_PERIOD_S[1] * 1e6)
+                self._track_sample_time(frame.type, t)
                 plot_time = self._plot_time(t, frame.type, now_s)
                 diff_raw, wilson_raw = struct.unpack("<HH", payload)
                 diff = self.diff.run(diff_raw)
@@ -241,6 +254,7 @@ class LiveRecorder:
                 self.ecg_samples += 1
             elif frame.type == 2:
                 t = t0 + int(i * SAMPLE_PERIOD_S[2] * 1e6)
+                self._track_sample_time(frame.type, t)
                 plot_time = self._plot_time(t, frame.type, now_s)
                 raw_x, raw_y, raw_z = struct.unpack("<hhh", payload)
                 magnitude, smoothed = self.motion.run(raw_x, raw_y, raw_z)
@@ -254,11 +268,28 @@ class LiveRecorder:
                 # Unwrap the optical clock once; reuse it for both the pulse
                 # analysis buffer and the plot sample time.
                 t = self._unwrap(raw_t, frame.type)
+                self._track_sample_time(frame.type, t)
                 plot_time = self._plot_time(t, frame.type, now_s)
                 self.pulse.add(t/1e6, red, infrared)
                 self._sample("red", plot_time, red)
                 self._sample("infrared", plot_time, infrared)
                 self.optical_samples += 1
+
+    def _track_sample_time(self, kind: int, timestamp_us: int) -> None:
+        previous = self._last_sample_us.get(kind)
+        period = round(SAMPLE_PERIOD_S[kind] * 1_000_000)
+        if previous is not None:
+            delta = timestamp_us - previous
+            if delta <= 0 or delta > period * 1.5:
+                self.timestamp_discontinuities[kind] += 1
+                if delta > period * 1.5:
+                    self.estimated_missing_samples[kind] += max(0, round(delta / period) - 1)
+                if kind == 1:
+                    self.diff.reset()
+                    self.wilson.reset()
+                elif kind == 3:
+                    self.pulse.data.clear()
+        self._last_sample_us[kind] = timestamp_us
 
     def poll(self) -> None:
         if not self.started or self.closed:
@@ -332,14 +363,17 @@ class LiveRecorder:
             "history": history,
         }
 
-    def stats(self) -> dict[str, int]:
+    def stats(self) -> dict[str, Any]:
         return {"frames": self.frames, "sequence_gaps": self.gaps,
                 "bad_frames": self.decoder.bad,
                 "display_write_failures": self.display_write_failures,
                 "ecg_samples": self.ecg_samples,
                 "accel_samples": self.accel_samples,
                 "optical_samples": self.optical_samples,
-                "rep_count": self.rep_count}
+                "rep_count": self.rep_count,
+                "timestamp_discontinuities": dict(self.timestamp_discontinuities),
+                "estimated_missing_samples": dict(self.estimated_missing_samples),
+                "board_diagnostics": dict(self.board_diagnostics)}
 
     def close(self) -> None:
         if self.closed:

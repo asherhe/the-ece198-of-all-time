@@ -33,6 +33,9 @@ private:
   unsigned long previousHeartUpdate = 0;
 
   bool bigHeart = false;
+  uint16_t displayOffset = 0;
+  bool displayPending = false;
+  void sendDisplayChunk();
 
   void draw_frame(bool big_or_small);
   void update_bpm();

@@ -1,0 +1,36 @@
+{
+  "protocol_version": 1,
+  "started_utc": "2026-11-22T16:13:26Z",
+  "port": "COM8",
+  "duration_minutes": 0.5,
+  "frames": 1828,
+  "sequence_gaps": 0,
+  "bad_frames": 0,
+  "display_write_failures": 0,
+  "ecg_samples": 6008,
+  "accel_samples": 1500,
+  "optical_samples": 2988,
+  "rep_count": 0,
+  "timestamp_discontinuities": {
+    "1": 0,
+    "2": 0,
+    "3": 22
+  },
+  "estimated_missing_samples": {
+    "1": 0,
+    "2": 0,
+    "3": 22
+  },
+  "board_diagnostics": {
+    "missed_ecg_deadlines": 1,
+    "missed_accel_deadlines": 0,
+    "i2c_errors": 0,
+    "optical_fifo_overflows": 3502,
+    "tx_dropped_ecg": 0,
+    "tx_dropped_accel": 0,
+    "tx_dropped_optical": 0,
+    "max_loop_us": 6206,
+    "max_optical_us": 960,
+    "optical_ready": 1
+  }
+}

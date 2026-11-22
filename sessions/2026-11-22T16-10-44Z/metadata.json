@@ -1,0 +1,25 @@
+{
+  "protocol_version": 1,
+  "started_utc": "2026-11-22T16:10:44Z",
+  "port": "COM8",
+  "duration_minutes": 0.4,
+  "frames": 1448,
+  "sequence_gaps": 0,
+  "bad_frames": 0,
+  "display_write_failures": 0,
+  "ecg_samples": 4824,
+  "accel_samples": 1210,
+  "optical_samples": 2412,
+  "rep_count": 0,
+  "timestamp_discontinuities": {
+    "1": 0,
+    "2": 0,
+    "3": 0
+  },
+  "estimated_missing_samples": {
+    "1": 0,
+    "2": 0,
+    "3": 0
+  },
+  "board_diagnostics": {}
+}

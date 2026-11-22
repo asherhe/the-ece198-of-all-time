@@ -54,3 +54,34 @@ within a frame are spaced by their nominal sample period; serial delivery can
 add timing uncertainty. The CSV files retain the board timestamps. The plot
 refreshes about five times per second, and recording continues for the chosen
 duration.
+
+## Command-line loss diagnostics
+
+For a one-minute capture with a report every five seconds:
+
+```powershell
+python -m SerialAnalysis.Live --port COM8 --duration-min 1 --status-interval 5
+```
+
+The rates are received samples per wall-clock second (nominally 200 Hz ECG,
+50 Hz acceleration, and 100 Hz optical). `sequence_gaps` counts missing frame
+sequence numbers across all streams, not missing samples; `bad_frames` counts
+invalid frame lengths or checksums. `timestamp_discontinuities` and
+`estimated_missing_samples` are per-stream board-time estimates, not a direct
+measurement of loss. Short-term rates vary with batching. The recorder saves
+these counters and the latest board diagnostics in `metadata.json`.
+
+The real firmware sends cumulative diagnostics once a second: missed ECG and
+acceleration deadlines, I2C errors, optical FIFO overflow, dropped samples per
+transmit stream, the maximum loop and optical service durations in microseconds,
+and whether the optical sensor initialized. A dropped diagnostics frame can
+also cause a global sequence gap. If `optical_overflow_counter_reliable` is 0,
+the sensor's overflow register failed a clear check: its overflow count is not
+reliable and FIFO loss cannot be ruled out by that counter. Use rates and
+observed timestamp gaps as additional evidence. Optical timestamps are estimated
+from the FIFO sample rate; a long service gap causes them to be re-anchored.
+
+The board updates the OLED framebuffer in short I2C chunks so that full-screen
+transfers do not block sensor sampling. A display update can therefore appear
+progressively. The physical display and sensor signal quality still need a
+visual and hardware check.

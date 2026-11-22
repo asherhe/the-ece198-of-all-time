@@ -48,7 +48,7 @@ Every frame is `A5 5A | type:u8 | sequence:u16 | first_sample_micros:u32 |
 count:u8 | payload_bytes:u16 | payload | CRC16:u16`, little endian. CRC16 is
 CCITT-FALSE (initial 0xFFFF, polynomial 0x1021) over `type` through `payload`.
 Sequence numbers advance for every attempted board frame, so gaps reveal
-transmit drops. A damaged frame is discarded and the decoder searches for the
+missing frames across all types, including diagnostics. A damaged frame is discarded and the decoder searches for the
 next marker. Board microsecond timestamps wrap after about 71 minutes; the CLI
 unwraps them for recording.
 
@@ -57,9 +57,12 @@ unwraps them for recording.
 | 1 ECG | `diff_adc:u16, wilson_adc:u16` | 200 Hz, 5 ms between batch samples |
 | 2 acceleration | `x:i16, y:i16, z:i16` MPU6050 raw counts | 50 Hz, 20 ms between batch samples |
 | 3 optical | `micros:u32, red:u32, infrared:u32` | each available MAX30102 FIFO sample |
+| 4 diagnostics | cumulative board counters (48 bytes) | once per second |
 | 0x80 display, computer to board | `bpm:u16, remaining_seconds:u32, flags:u8` | once per second; flags bit 0 = valid BPM |
 
-The board writes only complete frames when its USB serial transmit buffer has
+The real board also reports sensor, FIFO, timing, and transmit counters; see
+[Live/README.md](Live/README.md) for their interpretation. The board writes only
+complete frames when its USB serial transmit buffer has
 room. It does not block sensor sampling to wait for the computer. The OLED
 blinks an 8 px square in its upper-right corner when no valid display update
 has arrived for three seconds. The CLI reports frame sequence gaps and bad

@@ -12,14 +12,14 @@ import numpy as np
 
 CHANNEL_SPECS: dict[str, tuple[str, float, float]] = {
     # channel_name: (subplot_title, expected_dt_s, gap_factor)
-    "diff_raw": ("ECG Diff (Raw)", 0.005, 3.0),
-    "wilson_raw": ("ECG Wilson (Raw)", 0.005, 3.0),
-    "diff_filtered": ("ECG Diff (Filtered)", 0.005, 3.0),
-    "wilson_filtered": ("ECG Wilson (Filtered)", 0.005, 3.0),
-    "accel_magnitude": ("Accel Magnitude", 0.020, 3.0),
-    "accel_smoothed": ("Accel Smoothed", 0.020, 3.0),
-    "red": ("Optical Red", 0.010, 3.0),
-    "infrared": ("Optical IR", 0.010, 3.0),
+    "diff_raw": ("ECG Diff (Raw)", 0.005, 1.5),
+    "wilson_raw": ("ECG Wilson (Raw)", 0.005, 1.5),
+    "diff_filtered": ("ECG Diff (Filtered)", 0.005, 1.5),
+    "wilson_filtered": ("ECG Wilson (Filtered)", 0.005, 1.5),
+    "accel_magnitude": ("Accel Magnitude", 0.020, 1.5),
+    "accel_smoothed": ("Accel Smoothed", 0.020, 1.5),
+    "red": ("Optical Red", 0.010, 1.5),
+    "infrared": ("Optical IR", 0.010, 1.5),
 }
 
 
@@ -33,7 +33,7 @@ def build_gapped_xy(
     """Return x (seconds relative to now_s) and y arrays with NaNs across gaps."""
     min_t = now_s - window_s
     max_t = now_s + 0.05
-    gap_threshold = max(expected_dt_s * gap_factor, 0.05)
+    gap_threshold = expected_dt_s * gap_factor
 
     xs: list[float] = []
     ys: list[float] = []
