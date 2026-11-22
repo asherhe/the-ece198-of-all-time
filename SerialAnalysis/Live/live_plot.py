@@ -7,6 +7,7 @@ import time
 from typing import Any, Iterable
 
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 import numpy as np
 
 
@@ -64,8 +65,12 @@ class LivePlot:
         window_s: float = 5.0,
         figsize: tuple[float, float] = (10.0, 6.0),
         dpi: int = 80,
+        channel_windows: dict[str, float] | None = None,
     ) -> None:
         self.window_s = float(window_s)
+        self.channel_windows = {name: float(value) for name, value in (channel_windows or {}).items()}
+        if self.window_s <= 0 or any(value <= 0 for value in self.channel_windows.values()):
+            raise ValueError("plot windows must be positive")
         selected = list(channels) if channels is not None else list(CHANNEL_SPECS.keys())
         self.channels = [ch for ch in selected if ch in CHANNEL_SPECS]
         if not self.channels:
@@ -73,22 +78,37 @@ class LivePlot:
 
         n = len(self.channels)
         cols = 2 if n > 1 else 1
-        rows = (n + cols - 1) // cols
-
-        self.figure, axes_arr = plt.subplots(rows, cols, figsize=figsize, dpi=dpi, sharex=False)
-        if isinstance(axes_arr, np.ndarray):
-            axes_list = list(axes_arr.flat)
-        else:
-            axes_list = [axes_arr]
+        span_accel = (n % 2 == 1 and {"accel_magnitude", "red", "infrared"}
+                      <= set(self.channels))
+        positions = []
+        row = col = 0
+        for ch in self.channels:
+            if span_accel and ch == "accel_magnitude":
+                if col:
+                    row += 1
+                    col = 0
+                positions.append((row, slice(None)))
+                row += 1
+            else:
+                positions.append((row, col))
+                col += 1
+                if col == cols:
+                    row += 1
+                    col = 0
+        rows = row + bool(col)
+        self.figure = plt.figure(figsize=figsize, dpi=dpi)
+        grid = self.figure.add_gridspec(rows, cols)
 
         self.axes: dict[str, Any] = {}
         self.lines: dict[str, Any] = {}
 
-        for idx, ch in enumerate(self.channels):
-            ax = axes_list[idx]
+        for ch, (row, col) in zip(self.channels, positions):
+            ax = self.figure.add_subplot(grid[row, col])
             title, _, _ = CHANNEL_SPECS[ch]
+            if ch == "accel_magnitude":
+                title += " (red dashed: rep completed)"
             ax.set_title(title, fontsize=9)
-            ax.set_xlim(-self.window_s, 0.0)
+            ax.set_xlim(-self.channel_windows.get(ch, self.window_s), 0.0)
             ax.set_xlabel("Time (s)", fontsize=8)
             ax.tick_params(labelsize=8)
             ax.grid(True, alpha=0.25)
@@ -96,8 +116,13 @@ class LivePlot:
             self.axes[ch] = ax
             self.lines[ch] = line
 
-        for extra_ax in axes_list[n:]:
-            extra_ax.set_visible(False)
+        self.rep_markers = None
+        if "accel_magnitude" in self.axes:
+            ax = self.axes["accel_magnitude"]
+            self.rep_markers = LineCollection([], colors="tab:red", linewidths=1.2,
+                                              linestyles="--", alpha=0.85,
+                                              transform=ax.get_xaxis_transform())
+            ax.add_collection(self.rep_markers)
 
         self.figure.tight_layout()
 
@@ -105,19 +130,26 @@ class LivePlot:
         ref_s = time.monotonic() if now_s is None else now_s
         snap = recorder.snapshot(now_s=ref_s)
 
+        if self.rep_markers is not None:
+            events = recorder.rep_events_snapshot(now_s=ref_s)
+            accel_window = self.channel_windows.get("accel_magnitude", self.window_s)
+            self.rep_markers.set_segments([[(t - ref_s, 0), (t - ref_s, 1)]
+                                           for t in events if ref_s - accel_window <= t <= ref_s])
+
         for ch in self.channels:
             _, expected_dt, gap_factor = CHANNEL_SPECS[ch]
+            window = self.channel_windows.get(ch, self.window_s)
             x, y = build_gapped_xy(
                 snap.get(ch, ()),
                 now_s=ref_s,
-                window_s=self.window_s,
+                window_s=window,
                 expected_dt_s=expected_dt,
                 gap_factor=gap_factor,
             )
             line = self.lines[ch]
             ax = self.axes[ch]
             line.set_data(x, y)
-            ax.set_xlim(-self.window_s, 0.0)
+            ax.set_xlim(-window, 0.0)
 
             valid_y = y[np.isfinite(y)]
             if valid_y.size > 0:
@@ -229,12 +261,13 @@ def run_jupyter_live_plot(
     """Drive Jupyter display updates while polling serial in the background.
 
     If ``vitals_view`` and ``vitals_handle`` are given, the BPM/SpO2/reps
-    readout and trend plot refresh on the same cadence as the signal plot.
+    readout and trend plot refresh once per second.
     """
     runner = BackgroundRecorderRunner(recorder, poll_interval_s=0.005)
     runner.start()
     try:
         last_refresh = 0.0
+        last_vitals_refresh = 0.0
         while not getattr(recorder, "done", False) and not getattr(recorder, "closed", False):
             if runner.last_error is not None:
                 raise runner.last_error
@@ -242,10 +275,12 @@ def run_jupyter_live_plot(
             if now - last_refresh >= refresh_s:
                 plot.update(recorder, now_s=now)
                 display_handle.update(plot.figure)
-                if vitals_view is not None and vitals_handle is not None:
+                if (vitals_view is not None and vitals_handle is not None
+                        and now - last_vitals_refresh >= 1.0):
                     vitals_view.update(recorder, now_s=now)
                     vitals_handle.update(vitals_view.figure)
-                last_refresh = time.monotonic()
+                    last_vitals_refresh = now
+                last_refresh = now
             time.sleep(0.02)
     finally:
         runner.stop()

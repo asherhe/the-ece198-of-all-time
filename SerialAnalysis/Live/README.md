@@ -5,8 +5,8 @@ applies the same ECG, acceleration, and provisional pulse analysis, counts
 rehab reps from the accelerometer, sends heart rate and remaining time to the
 board once per second, and writes the same four session files. The notebook
 shows a BPM / SpO₂ / rep-count readout and a rolling heart-rate and SpO₂ trend
-plot above a five-second rolling window of raw and filtered ECG, acceleration,
-and raw optical signals. The pulse and SpO₂ estimates are prototype
+plot above one-second raw and filtered ECG plots and five-second acceleration
+and optical plots. The pulse and SpO₂ estimates are prototype
 measurements, not clinically validated.
 
 The rep counter is a port of the Arduino rehab sketch: it high-pass filters out
@@ -51,9 +51,10 @@ The output folder defaults to `sessions` relative to the notebook kernel's
 working directory or the CLI's working directory. All plots use the same host
 receive clock, so they scroll together over the latest five seconds. Samples
 within a frame are spaced by their nominal sample period; serial delivery can
-add timing uncertainty. The CSV files retain the board timestamps. The plot
-refreshes about five times per second, and recording continues for the chosen
-duration.
+add timing uncertainty. The CSV files retain the board timestamps. The notebook targets a signal refresh every 0.2 seconds, but rendering and
+Jupyter display overhead can reduce the actual rate. The vitals view updates
+once per second, while recording continues in a background thread. The red
+dashed markers on acceleration indicate completed reps.
 
 ## Command-line loss diagnostics
 

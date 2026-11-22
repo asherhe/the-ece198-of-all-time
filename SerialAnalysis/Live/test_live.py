@@ -226,6 +226,64 @@ class RecorderTests(unittest.TestCase):
                                now_s=100.02, expected_dt_s=expected, gap_factor=factor)
         self.assertEqual(int(np.isnan(y).sum()), 1)
 
+    def test_rep_markers_follow_acceleration_timestamps_and_expire(self):
+        from matplotlib import pyplot as plt
+        from SerialAnalysis.Live.live_plot import LivePlot
+
+        plt.switch_backend("Agg")
+        with tempfile.TemporaryDirectory() as directory:
+            with LiveRecorder("FAKE", directory, port=FakePort(), window_s=5) as recorder:
+                with patch.object(recorder.reps, "run", side_effect=[0, 1, 1]):
+                    payload = struct.pack("<hhhhhhhhh", 0, 0, 16384, 0, 0, 16384,
+                                          0, 0, 16384)
+                    recorder.feed(encode_frame(Frame(2, 0, 1_000_000, 3, payload)),
+                                  received_at=100.0)
+                self.assertEqual(recorder.rep_events_snapshot(now_s=100.1), [100.02])
+                plot = LivePlot(channels=["diff_filtered", "wilson_filtered",
+                                          "accel_magnitude", "red", "infrared"],
+                                window_s=1)
+                try:
+                    plot.update(recorder, now_s=100.1)
+                    accel = plot.axes["accel_magnitude"].get_subplotspec()
+                    red = plot.axes["red"].get_subplotspec()
+                    infrared = plot.axes["infrared"].get_subplotspec()
+                    self.assertEqual((accel.colspan.start, accel.colspan.stop), (0, 2))
+                    self.assertEqual(red.rowspan.start, infrared.rowspan.start)
+                    self.assertEqual(len(plot.rep_markers.get_segments()), 1)
+                    self.assertAlmostEqual(plot.rep_markers.get_segments()[0][0, 0], -0.08)
+                    plot.update(recorder, now_s=101.1)
+                    self.assertEqual(len(plot.rep_markers.get_segments()), 0)
+                    self.assertEqual(recorder.rep_events_snapshot(now_s=106), [])
+                finally:
+                    plt.close(plot.figure)
+
+    def test_signal_groups_use_independent_windows(self):
+        from matplotlib import pyplot as plt
+        from SerialAnalysis.Live.live_plot import LivePlot
+
+        plt.switch_backend("Agg")
+        channels = ["red", "infrared", "accel_magnitude", "diff_filtered",
+                    "wilson_filtered", "diff_raw", "wilson_raw"]
+        ecg = channels[3:]
+        with tempfile.TemporaryDirectory() as directory:
+            with LiveRecorder("FAKE", directory, port=FakePort(), window_s=5) as recorder:
+                recorder.rep_events.append(96.5)
+                plot = LivePlot(channels=channels, window_s=5,
+                                channel_windows={name: 1 for name in ecg})
+                try:
+                    plot.update(recorder, now_s=100)
+                    for name in channels[:3]:
+                        self.assertEqual(plot.axes[name].get_xlim(), (-5, 0))
+                    for name in ecg:
+                        self.assertEqual(plot.axes[name].get_xlim(), (-1, 0))
+                    self.assertEqual(plot.rep_markers.get_segments()[0][0, 0], -3.5)
+                    accel = plot.axes["accel_magnitude"].get_subplotspec()
+                    self.assertEqual((accel.colspan.start, accel.colspan.stop), (0, 2))
+                    self.assertLess(plot.axes["red"].get_subplotspec().rowspan.start,
+                                    plot.axes["diff_filtered"].get_subplotspec().rowspan.start)
+                finally:
+                    plt.close(plot.figure)
+
     def test_timestamp_rollover_is_unwrapped(self):
         with tempfile.TemporaryDirectory() as directory:
             with LiveRecorder("FAKE", directory, port=FakePort()) as recorder:

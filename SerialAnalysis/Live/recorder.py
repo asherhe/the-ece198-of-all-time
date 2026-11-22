@@ -73,6 +73,7 @@ class LiveRecorder:
         # left as None when that reading is not currently valid.
         self.vitals_history: deque[tuple[float, int | None, int | None]] = deque()
         self.rep_count = 0
+        self.rep_events: deque[float] = deque()
         # Maps unwrapped board microseconds onto host-monotonic seconds so the
         # plot timeline follows the board's own clock instead of host arrival
         # time. Kept per frame type because the sensors can run on independent
@@ -153,6 +154,7 @@ class LiveRecorder:
             elif kind == 2:
                 for name in ("accel_magnitude", "accel_smoothed"):
                     self.buffers[name].clear()
+                self.rep_events.clear()
             else:
                 for name in ("red", "infrared"):
                     self.buffers[name].clear()
@@ -165,6 +167,7 @@ class LiveRecorder:
     def clear_window(self) -> None:
         for buffer in self.buffers.values():
             buffer.clear()
+        self.rep_events.clear()
         self._board_to_host_offset.clear()
 
     def _sample(self, channel: str, received_s: float, value: float) -> None:
@@ -175,6 +178,8 @@ class LiveRecorder:
         for buffer in self.buffers.values():
             while buffer and buffer[0][0] < cutoff:
                 buffer.popleft()
+        while self.rep_events and self.rep_events[0] < cutoff:
+            self.rep_events.popleft()
 
     @staticmethod
     def _sample_width(frame: Frame) -> int:
@@ -258,7 +263,10 @@ class LiveRecorder:
                 plot_time = self._plot_time(t, frame.type, now_s)
                 raw_x, raw_y, raw_z = struct.unpack("<hhh", payload)
                 magnitude, smoothed = self.motion.run(raw_x, raw_y, raw_z)
+                previous_reps = self.rep_count
                 self.rep_count = self.reps.run(raw_x, raw_y, raw_z, t // 1000)
+                if self.rep_count > previous_reps:
+                    self.rep_events.append(plot_time)
                 self._accel.writerow([t, magnitude, smoothed])
                 self._sample("accel_magnitude", plot_time, magnitude)
                 self._sample("accel_smoothed", plot_time, smoothed)
@@ -343,6 +351,12 @@ class LiveRecorder:
         with self._data_lock:
             self._trim(ref_s)
             return {name: list(buffer) for name, buffer in self.buffers.items()}
+
+    def rep_events_snapshot(self, *, now_s: float | None = None) -> list[float]:
+        ref_s = time.monotonic() if now_s is None else now_s
+        with self._data_lock:
+            self._trim(ref_s)
+            return list(self.rep_events)
 
     def vitals_snapshot(self) -> dict[str, Any]:
         """Latest vitals readout plus rolling BPM/SpO2 history for plotting.
