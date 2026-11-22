@@ -22,7 +22,7 @@ class Biquad:
 
 
 class EcgFilter:
-    def __init__(self, adc_max: float = 16383.0):
+    def __init__(self, adc_max: float = 1023.0):
         self.notch = Biquad(0.9695312529087462, 0.5992023379391097,
                             0.9695312529087462, 0.5992023379391097,
                             0.9390625058174924)
@@ -35,9 +35,7 @@ class EcgFilter:
         self.taps = [((1 - wc/pi) if m == 0 else -sin(wc*m)/(pi*m))
                      * (0.54 - 0.46*cos(2*pi*k/200))
                      for k in range(201) for m in (k - 100,)]
-        self.adc_max = adc_max
-        self.rail_margin = max(5.0, adc_max*0.01)
-        self.max_slew = adc_max*0.15
+        self.max_slew = adc_max*0.25
         self.reset()
 
     def reset(self) -> None:
@@ -52,8 +50,6 @@ class EcgFilter:
             self.b.reset()
             self.history = [0.0]*201
             self.ready = True
-        if raw <= self.rail_margin or raw >= self.adc_max - self.rail_margin:
-            raw = self.prev_clean_raw
         raw = max(self.prev_clean_raw - self.max_slew,
                   min(self.prev_clean_raw + self.max_slew, raw))
         self.prev_clean_raw = raw

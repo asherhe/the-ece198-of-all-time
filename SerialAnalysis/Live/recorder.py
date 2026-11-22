@@ -62,8 +62,8 @@ class LiveRecorder:
         self.port = port
         self.owns_port = port is None
         self.decoder = Decoder()
-        self.diff = EcgFilter()
-        self.wilson = EcgFilter()
+        self.diff = EcgFilter(16383.0)
+        self.wilson = EcgFilter(16383.0)
         self.motion = AccelerationAnalysis()
         self.reps = RepCounter()
         self.pulse = Pulse()

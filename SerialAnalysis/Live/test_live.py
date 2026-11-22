@@ -13,7 +13,7 @@ import numpy as np
 
 from SerialAnalysis.Live.protocol import Decoder, Frame, crc16, encode_frame
 from SerialAnalysis.Live.recorder import LiveRecorder, open_serial
-from SerialAnalysis.Live.analysis import RepCounter
+from SerialAnalysis.Live.analysis import EcgFilter, RepCounter
 
 
 class FakePort:
@@ -39,6 +39,25 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(decoder.feed(b"noise" + good[:5]), [])
         self.assertEqual(decoder.feed(good[5:] + damaged + good), [frame, frame])
         self.assertEqual(decoder.bad, 1)
+
+
+class EcgFilterTests(unittest.TestCase):
+    def test_adc_rails_and_slew_limit(self):
+        ecg = EcgFilter(16383.0)
+        ecg.run(16000)
+        ecg.run(16383)
+        self.assertEqual(ecg.prev_clean_raw, 16383)
+        ecg.run(0)
+        self.assertEqual(ecg.prev_clean_raw, 16383 - 16383 * 0.25)
+        for _ in range(3):
+            ecg.run(0)
+        self.assertEqual(ecg.prev_clean_raw, 0)
+
+    def test_default_and_recorder_adc_ranges(self):
+        self.assertEqual(EcgFilter().max_slew, 1023 * 0.25)
+        recorder = LiveRecorder("FAKE", port=FakePort())
+        self.assertEqual(recorder.diff.max_slew, 16383 * 0.25)
+        self.assertEqual(recorder.wilson.max_slew, 16383 * 0.25)
 
 
 class RecorderTests(unittest.TestCase):
