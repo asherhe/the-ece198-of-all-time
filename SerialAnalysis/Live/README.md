@@ -51,8 +51,10 @@ The output folder defaults to `sessions` relative to the notebook kernel's
 working directory or the CLI's working directory. All plots use the same host
 receive clock, so they scroll together over the latest five seconds. Samples
 within a frame are spaced by their nominal sample period; serial delivery can
-add timing uncertainty. The CSV files retain the board timestamps. The notebook targets a signal refresh every 0.2 seconds, but rendering and
-Jupyter display overhead can reduce the actual rate. The vitals view updates
+add timing uncertainty. The CSV files retain the board timestamps. The notebook targets a signal refresh every 0.1 seconds. Plots are drawn once
+and then only their lines are redrawn (blitting) and sent as PNG images, so a
+frame costs roughly 25 ms; the measured rate is shown in the vitals panel.
+An axis rescale forces one slower full redraw, which hysteresis keeps rare. The vitals view updates
 once per second, while recording continues in a background thread. The red
 dashed markers on acceleration indicate completed reps.
 
@@ -64,7 +66,7 @@ For a one-minute capture with a report every five seconds:
 python -m SerialAnalysis.Live --port COM8 --duration-min 1 --status-interval 5
 ```
 
-The rates are received samples per wall-clock second (nominally 200 Hz ECG,
+The rates are received samples per wall-clock second (nominally 400 Hz ECG,
 50 Hz acceleration, and 100 Hz optical). `sequence_gaps` counts missing frame
 sequence numbers across all streams, not missing samples; `bad_frames` counts
 invalid frame lengths or checksums. `timestamp_discontinuities` and

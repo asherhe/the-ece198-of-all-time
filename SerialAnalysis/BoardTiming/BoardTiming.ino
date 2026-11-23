@@ -16,7 +16,7 @@
 //   arduino-cli upload -b arduino:renesas_uno:minima -p COM8 SerialAnalysis/BoardTiming
 // Then read COM8 at 115200 baud (plain text, newline-terminated).
 
-static const uint32_t ECG_PERIOD_US = 5000;    // 200 Hz
+static const uint32_t ECG_PERIOD_US = 2500;    // 400 Hz
 static const uint32_t ACCEL_PERIOD_US = 20000; // 50 Hz
 
 MAX30105 optical;

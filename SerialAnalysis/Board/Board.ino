@@ -7,10 +7,9 @@
 static const uint8_t ECG_TYPE = 1, ACCEL_TYPE = 2, OPTICAL_TYPE = 3;
 static const uint8_t DISPLAY_TYPE = 0x80;
 static const uint32_t HOST_TIMEOUT_MS = 3000;
-static const uint32_t ECG_PERIOD_US = 5000;    // 200 Hz
-static const uint32_t ACCEL_PERIOD_US = 20000; // 50 Hz
+static const uint32_t ECG_PERIOD_US = 2500;      // 400 Hz
+static const uint32_t ACCEL_PERIOD_US = 20000;   // 50 Hz
 static const uint32_t OPTICAL_PERIOD_US = 10000; // 100 Hz FIFO service rate
-const int32_t SAMPLE_TIMEOUT = 3000000; // 3 seconds
 MAX30105 optical;
 OLED oled;
 bool opticalReady = false;
@@ -79,7 +78,7 @@ static void drainAdcCapacitor() {
 static uint16_t readIsolatedEcg(uint8_t pin) {
   drainAdcCapacitor();      // Discharge leftover voltage from previous channel inside the chip
   analogRead(pin);          // Switch MUX to target pin
-  delayMicroseconds(250);   // Allow high-impedance Wilson network to charge ADC capacitor
+  delayMicroseconds(120);   // Settle ADC capacitor while leaving generous margin at 400 Hz
 
   uint32_t sum = 0;
   for (uint8_t i = 0; i < 4; ++i) {
@@ -105,7 +104,7 @@ static void wakeAccel() {
 }
 static void sampleAccel(uint32_t t) {
   Wire.beginTransmission(0x68); Wire.write(0x3b);
-  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(0x68, 6, true) != 6) { ++i2cErrors; return; }
+  if (Wire.endTransmission(false) != 0 || Wire.requestFrom((uint8_t)0x68, (uint8_t)6, (uint8_t) true) != 6) { ++i2cErrors; return; }
   uint8_t *p = accelData + accelCount * 6;
   for (uint8_t i = 0; i < 3; ++i) { p[i * 2 + 1] = Wire.read(); p[i * 2] = Wire.read(); }
   if (!(p[0] | p[1] | p[2] | p[3] | p[4] | p[5])) {
@@ -125,7 +124,7 @@ static void sampleAccel(uint32_t t) {
 // represent more than three unread samples, even when its check() drains more.
 static bool readRegister(uint8_t reg, uint8_t &value) {
   Wire.beginTransmission(0x57); Wire.write(reg);
-  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(0x57, 1, true) != 1) {
+  if (Wire.endTransmission(false) != 0 || Wire.requestFrom((uint8_t)0x57, (uint8_t)1, (uint8_t) true) != 1) {
     ++i2cErrors; return false;
   }
   value = Wire.read(); return true;
@@ -140,9 +139,6 @@ static void sampleOptical() {
   uint8_t count = (writePtr - readPtr) & 31;
   overflow &= 0x1f;
   if (overflow && overflowCounterReliable) {
-    // A full FIFO makes pointer distance ambiguous. Reset it, but verify the
-    // counter actually clears: some connected modules do not expose a usable
-    // counter and would otherwise get stuck in an endless reset loop.
     flushOptical(); haveOpticalTime = false;
     optical.clearFIFO();
     uint8_t afterReset;
@@ -156,17 +152,14 @@ static void sampleOptical() {
   if (!count) return;
   uint32_t readTime = micros();
   uint32_t oldestEstimate = readTime - uint32_t(count - 1) * OPTICAL_PERIOD_US;
-  // A long pause with too few FIFO samples indicates an observable gap. Use
-  // time between drains, rather than accumulated clock drift, to detect it.
   if (!haveOpticalTime || uint32_t(readTime - lastOpticalRead) > uint32_t(count) * OPTICAL_PERIOD_US + 50000) {
     nextOpticalSample = oldestEstimate;
     haveOpticalTime = true;
   }
   lastOpticalRead = readTime;
-  // Limit each service to three samples to keep I2C operations bounded.
   if (count > 3) count = 3;
   Wire.beginTransmission(0x57); Wire.write(0x07);
-  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(0x57, int(count) * 6, true) != count * 6) {
+  if (Wire.endTransmission(false) != 0 || Wire.requestFrom((uint8_t)0x57, (uint8_t)(count * 6), (uint8_t) true) != count * 6) {
     ++i2cErrors; haveOpticalTime = false; return;
   }
   for (uint8_t i = 0; i < count; ++i) {
@@ -197,7 +190,7 @@ static void receiveDisplay() {
   while (Serial.available()) {
     uint8_t byte = Serial.read();
     if (rxSize == 0 && byte != 0xa5) continue;
-    if (rxSize == 1 && byte != 0x5a) { rxSize = 0; continue; }
+    if (rxSize == 1 && byte != 0x5a) { rxSize = (byte == 0xa5) ? 1 : 0; continue; }  // keep a repeated 0xa5
     rx[rxSize++] = byte;
     if (rxSize == 12 && (rx[2] != DISPLAY_TYPE || get16(rx + 10) != 7)) rxSize = 0;
     if (rxSize == 21) {
@@ -215,29 +208,22 @@ static void receiveDisplay() {
 
 void setup() {
   Serial.begin(115200);
-  // The working Prototype-1 waits before initializing its I2C devices.
-  // Let the display and sensor power supplies settle after power-up.
   delay(3000);
 
 #if defined(ARDUINO_ARCH_RENESAS) || defined(ARDUINO_ARCH_SAMD) || defined(ARDUINO_ARCH_ESP32)
   analogReadResolution(14);
 #endif
 
-  // configure analog ports
   pinMode(A0, INPUT);
   pinMode(A1, INPUT);
 
-  // configure accelerometer
   Wire.begin();
   wakeAccel();
-  // configure oximeter
   opticalReady = optical.begin(Wire, I2C_SPEED_FAST);
   if (opticalReady) optical.setup(60, 2, 2, 200, 118, 4096);
   else nextOpticalRetry = millis() + 1000;
-  // configure OLED
   oled.heart_rate = 0; oled.workout_time = 0; oled.begin();
 
-  // setup timers
   const uint32_t startUs = micros();
   nextEcg = startUs;
   nextAccel = startUs;

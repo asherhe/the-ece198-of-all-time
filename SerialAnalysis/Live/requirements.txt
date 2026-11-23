@@ -1,4 +1,6 @@
 pyserial>=3.5,<4
 matplotlib>=3.8,<4
+numpy>=1.26
+pillow>=10
 ipykernel>=6,<8
 jupyterlab>=4,<5

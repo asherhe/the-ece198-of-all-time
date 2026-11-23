@@ -2,9 +2,12 @@
 
 import csv
 import json
+from pathlib import Path
+import re
 import struct
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -184,7 +187,7 @@ class RecorderTests(unittest.TestCase):
             with (session / "ecg.csv").open(newline="") as file:
                 rows = list(csv.DictReader(file))
             self.assertEqual([int(row["board_us"]) for row in rows],
-                             [1_000_000, 1_005_000, 7_000_000])
+                             [1_000_000, 1_002_500, 7_000_000])
             with (session / "acceleration.csv").open(newline="") as file:
                 accel = list(csv.DictReader(file))
             self.assertAlmostEqual(float(accel[0]["magnitude_m_s2"]), 9.81)
@@ -199,9 +202,9 @@ class RecorderTests(unittest.TestCase):
                 accel = struct.pack("<hhh", 0, 0, 16384)
                 recorder.feed(encode_frame(Frame(1, 65534, 1000000, 1, ecg)), received_at=100)
                 recorder.feed(encode_frame(Frame(2, 65535, 1000000, 1, accel)), received_at=100)
-                recorder.feed(encode_frame(Frame(1, 0, 1005000, 1, ecg)), received_at=100.005)
+                recorder.feed(encode_frame(Frame(1, 0, 1002500, 1, ecg)), received_at=100.0025)
                 self.assertEqual(recorder.gaps, 0)
-                recorder.feed(encode_frame(Frame(1, 2, 1020000, 1, ecg)), received_at=100.020)
+                recorder.feed(encode_frame(Frame(1, 2, 1010000, 1, ecg)), received_at=100.010)
                 self.assertEqual(recorder.gaps, 1)
                 self.assertEqual(recorder.estimated_missing_samples[1], 2)
                 self.assertEqual(recorder.timestamp_discontinuities[1], 1)
@@ -222,7 +225,7 @@ class RecorderTests(unittest.TestCase):
     def test_plot_breaks_for_one_missing_sample(self):
         from SerialAnalysis.Live.live_plot import build_gapped_xy, CHANNEL_SPECS
         _, expected, factor = CHANNEL_SPECS["diff_raw"]
-        _, y = build_gapped_xy([(100.0, 1), (100.005, 2), (100.015, 3)],
+        _, y = build_gapped_xy([(100.0, 1), (100.0025, 2), (100.0075, 3)],
                                now_s=100.02, expected_dt_s=expected, gap_factor=factor)
         self.assertEqual(int(np.isnan(y).sum()), 1)
 
@@ -352,9 +355,9 @@ class RecorderTests(unittest.TestCase):
             with LiveRecorder("FAKE", directory, port=FakePort()) as recorder:
                 first = encode_frame(Frame(1, 0, 1_000_000, 2,
                     struct.pack("<HHHH", 8192, 9000, 8200, 9010)))
-                second = encode_frame(Frame(1, 1, 1_010_000, 2,
+                second = encode_frame(Frame(1, 1, 1_005_000, 2,
                     struct.pack("<HHHH", 8210, 9020, 8220, 9030)))
-                third = encode_frame(Frame(1, 2, 1_020_000, 2,
+                third = encode_frame(Frame(1, 2, 1_010_000, 2,
                     struct.pack("<HHHH", 8230, 9040, 8240, 9050)))
                 recorder.feed(first + second, received_at=100)
                 recorder.feed(third, received_at=100.001)
@@ -362,12 +365,12 @@ class RecorderTests(unittest.TestCase):
                 self.assertEqual(len(times), 6)
                 # Plot times follow the board clock: anchored so the first
                 # sample lands at the first host arrival, then spaced by the
-                # real 5 ms board period, not squashed into a ~2 ms sliver.
+                # real 2.5 ms board period, not squashed into a ~1 ms sliver.
                 self.assertTrue(all(a < b for a, b in zip(times, times[1:])))
                 for a, b in zip(times, times[1:]):
-                    self.assertAlmostEqual(b - a, 0.005)
+                    self.assertAlmostEqual(b - a, 0.0025)
                 self.assertAlmostEqual(times[0], 100.0)
-                self.assertAlmostEqual(times[-1], 100.025)
+                self.assertAlmostEqual(times[-1], 100.0125)
 
     def test_replayed_stream_is_continuous_except_at_injected_gap(self):
         # Replay several seconds of ECG+accel+optical on board clocks with one
@@ -380,23 +383,23 @@ class RecorderTests(unittest.TestCase):
                 ecg_seq = accel_seq = opt_seq = 0
                 ecg_us = accel_us = opt_us = 0
                 now = 300.0
-                # 4 seconds of data; ECG at 200 Hz (8/frame), gap during [2s,3s).
+                # 4 seconds of data; ECG at 400 Hz (8/frame), gap during [2s,3s).
                 for frame_idx in range(200):  # 200 * 20 ms = 4 s of wall time
                     block_start_s = frame_idx * 0.02
                     in_gap = 2.0 <= block_start_s < 3.0
 
                     if not in_gap:
                         payload = b""
-                        for _ in range(4):
+                        for _ in range(8):
                             payload += struct.pack("<HH", 8192, 9000)
-                            ecg_us += 5000
+                            ecg_us += 2500
                         recorder.feed(encode_frame(Frame(1, ecg_seq & 0xFFFF,
-                            ecg_us - 4 * 5000, 4, payload)), received_at=now)
+                            ecg_us - 8 * 2500, 8, payload)), received_at=now)
                         ecg_seq += 1
                     else:
                         # Keep the board clock advancing through the gap so the
                         # resumed samples land at their true (later) time.
-                        ecg_us += 4 * 5000
+                        ecg_us += 8 * 2500
 
                     # Accel every other frame (50 Hz, 1/frame here).
                     if frame_idx % 1 == 0:
@@ -463,6 +466,186 @@ class RepCounterTests(unittest.TestCase):
         for _ in range(40):
             rc.run(0, 0, 16384, t); t += 20
         self.assertEqual(rc.rep_count, 0)
+
+
+class RateConsistencyTests(unittest.TestCase):
+    """The host, the CLI and the firmware must agree on sample periods."""
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def test_firmware_and_cli_periods_match_python(self):
+        from SerialAnalysis.Live.protocol import (ACCEL_PERIOD_US, ECG_PERIOD_US,
+                                                  OPTICAL_PERIOD_US)
+        firmware = (self.ROOT / "Board" / "Board.ino").read_text()
+        cli = (self.ROOT / "CLI" / "protocol.hpp").read_text()
+        for name, value in (("ECG_PERIOD_US", ECG_PERIOD_US),
+                            ("ACCEL_PERIOD_US", ACCEL_PERIOD_US),
+                            ("OPTICAL_PERIOD_US", OPTICAL_PERIOD_US)):
+            match = re.search(rf"{name}\s*=\s*(\d+)", firmware)
+            self.assertIsNotNone(match, name)
+            self.assertEqual(int(match.group(1)), value, f"Board.ino {name}")
+            match = re.search(rf"k{name.title().replace('_', '')}\s*=\s*(\d+)", cli)
+            self.assertIsNotNone(match, f"CLI protocol.hpp constant for {name}")
+            self.assertEqual(int(match.group(1)), value, f"CLI {name}")
+
+    def test_filter_sample_rate_follows_protocol(self):
+        from SerialAnalysis.Live.analysis import EcgFilter
+        from SerialAnalysis.Live.protocol import ECG_RATE_HZ
+        self.assertEqual(EcgFilter.FS, ECG_RATE_HZ)
+
+
+class AnalysisTests(unittest.TestCase):
+    def test_ecg_filter_is_finite_and_resets(self):
+        from SerialAnalysis.Live.analysis import EcgFilter
+        filt = EcgFilter()
+        rng = np.random.default_rng(1)
+        outputs = [filt.run(8000 + int(v)) for v in rng.integers(-300, 300, 3000)]
+        self.assertTrue(np.isfinite(outputs).all())
+        filt.reset()
+        again = EcgFilter()
+        self.assertEqual(filt.run(8192), again.run(8192))
+
+    def test_ecg_filter_attenuates_dc_offset(self):
+        from SerialAnalysis.Live.analysis import EcgFilter
+        filt = EcgFilter()
+        out = [filt.run(9000) for _ in range(2000)]
+        self.assertLess(max(abs(v) for v in out[-400:]), 1.0)
+
+    def test_motion_input_reaches_ecg_filters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with LiveRecorder("FAKE", directory, port=FakePort()) as recorder:
+                recorder.feed(encode_frame(Frame(2, 0, 1_000_000, 2,
+                    struct.pack("<hhhhhh", 0, 0, 16384, 4000, 0, 16384))), received_at=100)
+                self.assertNotEqual(recorder.diff.latest_dynamic_accel, 0.0)
+                self.assertEqual(recorder.diff.latest_dynamic_accel,
+                                 recorder.wilson.latest_dynamic_accel)
+
+
+class FastPathTests(unittest.TestCase):
+    def test_decoder_recovers_after_large_garbage_quickly(self):
+        import time as _time
+        frame = Frame(1, 7, 99, 1, struct.pack("<HH", 1, 2))
+        good = encode_frame(frame)
+        decoder = Decoder()
+        started = _time.perf_counter()
+        frames = decoder.feed(bytes(range(256)) * 400 + good)
+        self.assertEqual(frames, [frame])
+        self.assertLess(_time.perf_counter() - started, 0.5)
+
+    def test_decoder_keeps_marker_split_across_reads(self):
+        frame = Frame(1, 1, 1, 1, struct.pack("<HH", 5, 6))
+        good = encode_frame(frame)
+        decoder = Decoder()
+        self.assertEqual(decoder.feed(b"junk" + good[:1]), [])
+        self.assertEqual(decoder.feed(good[1:]), [frame])
+
+    def test_poll_reads_only_waiting_bytes(self):
+        class WaitingPort(FakePort):
+            in_waiting = 37
+
+            def __init__(self):
+                super().__init__()
+                self.sizes = []
+
+            def read(self, size):
+                self.sizes.append(size)
+                return b""
+
+        port = WaitingPort()
+        with tempfile.TemporaryDirectory() as directory:
+            with LiveRecorder("FAKE", directory, port=port) as recorder:
+                recorder.poll()
+                port.in_waiting = 0
+                recorder.poll()
+        self.assertEqual(port.sizes, [37, 1])
+
+    def test_plot_blits_between_limit_changes(self):
+        from SerialAnalysis.Live.live_plot import LivePlot
+        with tempfile.TemporaryDirectory() as directory:
+            with LiveRecorder("FAKE", directory, port=FakePort(), window_s=5) as recorder:
+                payload = b"".join(struct.pack("<HH", 8000 + 100 * (i % 7), 7500)
+                                   for i in range(8))
+                now = 100.0
+                for i in range(40):
+                    recorder.feed(encode_frame(Frame(1, i, 1_000_000 + i * 20_000, 8, payload)),
+                                  received_at=now)
+                    now += 0.02
+                plot = LivePlot(channels=["diff_raw", "wilson_raw"], window_s=1)
+                plot.update(recorder, now_s=now)
+                first = plot.image_bytes()
+                self.assertTrue(first.startswith(b"\x89PNG"))
+                full_draws = plot.full_draws
+                for step in range(5):
+                    now += 0.02
+                    recorder.feed(encode_frame(Frame(1, 100 + step, 2_000_000 + step * 20_000,
+                                                     8, payload)), received_at=now)
+                    plot.update(recorder, now_s=now)
+                    plot.image_bytes()
+                self.assertEqual(plot.full_draws, full_draws,
+                                 "steady-state frames must reuse the cached background")
+                self.assertTrue(plot.image_bytes("jpeg").startswith(b"\xff\xd8"))
+
+    def test_ylim_grows_immediately_and_shrinks_only_after_a_while(self):
+        from SerialAnalysis.Live.live_plot import LivePlot
+        plot = LivePlot(channels=["diff_raw", "wilson_raw"], window_s=1)
+        axis = plot.axes["diff_raw"]
+        plot.fit_ylim(axis, np.array([0.0, 100.0]), 0.0)
+        high = axis.get_ylim()[1]
+        plot.fit_ylim(axis, np.array([0.0, 300.0]), 0.1)
+        self.assertGreater(axis.get_ylim()[1], 300.0)
+        wide = axis.get_ylim()
+        plot.fit_ylim(axis, np.array([0.0, 20.0]), 0.5)
+        self.assertEqual(axis.get_ylim(), wide)
+        plot.fit_ylim(axis, np.array([0.0, 20.0]), 3.0)
+        self.assertLess(axis.get_ylim()[1], wide[1])
+        self.assertGreater(high, 100.0)
+
+    def test_live_runner_updates_display_until_recorder_is_done(self):
+        from SerialAnalysis.Live.live_plot import run_jupyter_live_plot
+
+        class FakeRecorder:
+            closed = False
+
+            def __init__(self):
+                self.polls = 0
+                self.started = time.monotonic()
+
+            @property
+            def done(self):
+                return time.monotonic() - self.started > 0.35
+
+            def poll(self):
+                self.polls += 1
+                time.sleep(0.002)
+
+        class FakeView:
+            fps = 0.0
+
+            def __init__(self):
+                self.updates = 0
+
+            def update(self, recorder, *, now_s=None):
+                self.updates += 1
+
+            def image(self, fmt):
+                return ("image", fmt)
+
+        class Handle:
+            def __init__(self):
+                self.images = []
+
+            def update(self, obj):
+                self.images.append(obj)
+
+        recorder, view, handle = FakeRecorder(), FakeView(), Handle()
+        vitals, vitals_handle = FakeView(), Handle()
+        run_jupyter_live_plot(recorder, view, handle, refresh_s=0.05,
+                              vitals_view=vitals, vitals_handle=vitals_handle)
+        self.assertGreater(recorder.polls, 10)
+        self.assertGreaterEqual(view.updates, 4)
+        self.assertLessEqual(view.updates, 9)
+        self.assertEqual(handle.images[0], ("image", "png"))
+        self.assertGreaterEqual(vitals.updates, 1)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,9 @@ SSD1306. Open `Board/Board.ino` in Arduino IDE and upload it. The board uses
 the prototype pin assignments: ECG A0/A1, MPU6050 at 0x68, MAX30102 on I2C,
 and SSD1306 at 0x3C. Close Arduino Serial Monitor before starting the CLI.
 
-Build with CMake and a C++17 compiler:
+The sample periods live in `Board/Board.ino`, `CLI/protocol.hpp` and
+`Live/protocol.py`; `Live/test_live.py` fails if they disagree. Build with CMake
+and a C++17 compiler:
 
 ```powershell
 cmake -S SerialAnalysis/CLI -B SerialAnalysis/CLI/build -G Ninja
@@ -30,9 +32,9 @@ SerialAnalysis/CLI/build/serial-analysis.exe --port COM3 --output sessions --dur
 Replace `COM3` with the board's port. The CLI creates a dated session folder
 with `ecg.csv`, `acceleration.csv`, `vitals.csv`, and `metadata.json`. Ctrl+C
 stops and closes the session. On Linux, pass a device such as `/dev/ttyACM0`.
-The serial port is 115200 baud, 8N1, with no flow control. On Windows, the CLI
-leaves DTR deasserted so opening a classic Arduino UNO does not trigger its
-USB-serial auto-reset. Other serial tools may assert DTR and reset the board.
+The serial port is 115200 baud, 8N1, with no flow control. The CLI asserts DTR, which native USB
+boards such as the UNO R4 Minima need in order to transmit; on some older
+boards this can reset the sketch once when the port opens.
 Recording begins immediately.
 
 ## Python live view
@@ -54,7 +56,7 @@ unwraps them for recording.
 
 | Type | Payload per sample | Rate |
 | --- | --- | --- |
-| 1 ECG | `diff_adc:u16, wilson_adc:u16` | 200 Hz, 5 ms between batch samples |
+| 1 ECG | `diff_adc:u16, wilson_adc:u16` | 400 Hz, 2.5 ms between batch samples |
 | 2 acceleration | `x:i16, y:i16, z:i16` MPU6050 raw counts | 50 Hz, 20 ms between batch samples |
 | 3 optical | `micros:u32, red:u32, infrared:u32` | each available MAX30102 FIFO sample |
 | 4 diagnostics | cumulative board counters (48 bytes) | once per second |
@@ -70,8 +72,9 @@ checksums every ten seconds and saves those counts in metadata.
 
 ## Analysis and limits
 
-ECG uses the prototype's two 40 Hz low-pass biquad coefficient sets and
-201-tap 0.5 Hz high-pass FIR, with corrected filter state updates. Acceleration
+ECG runs median spike/baseline removal, NLMS accelerometer motion cancellation,
+60/120 Hz notches, a 1-35 Hz biquad band-pass, a sliding-FFT noise gate and AGC
+(`CLI/ecg_filter.hpp`, ported to `Live/analysis.py`; outputs agree to ~1e-8). Acceleration
 uses the prototype scale and smoothing factor. The pulse/SpO2 analysis is a
 portable provisional peak and ratio estimator, **not an exact port of the
 SparkFun/MAXIM algorithm**. Results carry validity flags and should be checked

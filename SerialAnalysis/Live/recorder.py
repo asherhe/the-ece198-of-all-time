@@ -11,14 +11,16 @@ import time
 from typing import Any
 
 from .analysis import AccelerationAnalysis, EcgFilter, Pulse, RepCounter
-from .protocol import Decoder, Frame, encode_frame
+from .protocol import SAMPLE_PERIOD_US, Decoder, Frame, encode_frame
 
 
 CHANNELS = (
     "diff_raw", "wilson_raw", "diff_filtered", "wilson_filtered",
     "accel_magnitude", "accel_smoothed", "red", "infrared",
 )
-SAMPLE_PERIOD_S = {1: 0.005, 2: 0.020, 3: 0.010}
+SAMPLE_PERIOD_S = {kind: period / 1e6 for kind, period in SAMPLE_PERIOD_US.items()}
+# Largest single read; the serial port is polled for whatever has arrived.
+READ_CHUNK = 4096
 
 
 def open_serial(port_name: str) -> Any:
@@ -246,7 +248,7 @@ class LiveRecorder:
         for i in range(frame.count):
             payload = frame.payload[i*width:(i+1)*width]
             if frame.type == 1:
-                t = t0 + int(i * SAMPLE_PERIOD_S[1] * 1e6)
+                t = t0 + i * SAMPLE_PERIOD_US[1]
                 self._track_sample_time(frame.type, t)
                 plot_time = self._plot_time(t, frame.type, now_s)
                 diff_raw, wilson_raw = struct.unpack("<HH", payload)
@@ -258,11 +260,14 @@ class LiveRecorder:
                     self._sample(name, plot_time, value)
                 self.ecg_samples += 1
             elif frame.type == 2:
-                t = t0 + int(i * SAMPLE_PERIOD_S[2] * 1e6)
+                t = t0 + i * SAMPLE_PERIOD_US[2]
                 self._track_sample_time(frame.type, t)
                 plot_time = self._plot_time(t, frame.type, now_s)
                 raw_x, raw_y, raw_z = struct.unpack("<hhh", payload)
                 magnitude, smoothed = self.motion.run(raw_x, raw_y, raw_z)
+                dynamic = magnitude - smoothed
+                self.diff.update_motion(dynamic)
+                self.wilson.update_motion(dynamic)
                 previous_reps = self.rep_count
                 self.rep_count = self.reps.run(raw_x, raw_y, raw_z, t // 1000)
                 if self.rep_count > previous_reps:
@@ -285,7 +290,7 @@ class LiveRecorder:
 
     def _track_sample_time(self, kind: int, timestamp_us: int) -> None:
         previous = self._last_sample_us.get(kind)
-        period = round(SAMPLE_PERIOD_S[kind] * 1_000_000)
+        period = SAMPLE_PERIOD_US[kind]
         if previous is not None:
             delta = timestamp_us - previous
             if delta <= 0 or delta > period * 1.5:
@@ -299,11 +304,25 @@ class LiveRecorder:
                     self.pulse.data.clear()
         self._last_sample_us[kind] = timestamp_us
 
+    def _read_available(self) -> bytes:
+        """Return the bytes already waiting on the port.
+
+        ``read(n)`` blocks until ``n`` bytes arrive or the port timeout
+        expires. Asking for a fixed 1024 bytes at the board's ~4 KB/s made
+        every poll wait for the 100 ms timeout, so samples reached the plot
+        in bursts. Reading only what is waiting (at least one byte, which
+        still honours the timeout while the line is idle) removes that delay.
+        """
+        waiting = getattr(self.port, "in_waiting", None)
+        if waiting is None:  # serial-like test/replay objects
+            return self.port.read(1024)
+        return self.port.read(max(1, min(READ_CHUNK, waiting)))
+
     def poll(self) -> None:
         if not self.started or self.closed:
             raise RuntimeError("recorder is not active")
         with self._io_lock:
-            data = self.port.read(1024)
+            data = self._read_available()
         if data:
             self.feed(data)
         now = time.monotonic()
