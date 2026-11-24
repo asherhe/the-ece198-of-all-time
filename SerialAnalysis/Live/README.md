@@ -2,7 +2,7 @@
 
 This is a Python port of `SerialAnalysis/CLI`. It decodes the same board frames,
 applies the same ECG, acceleration, and provisional pulse analysis, counts
-rehab reps from the accelerometer, sends heart rate and remaining time to the
+rehab reps from the accelerometer, sends heart rate, remaining time, and rep count to the
 board once per second, and writes the same four session files. The notebook
 shows a BPM / SpO₂ / rep-count readout and a rolling heart-rate and SpO₂ trend
 plot above one-second raw and filtered ECG plots and five-second acceleration

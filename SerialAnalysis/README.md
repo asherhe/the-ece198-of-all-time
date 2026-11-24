@@ -58,13 +58,13 @@ unwraps them for recording.
 | 2 acceleration | `x:i16, y:i16, z:i16` MPU6050 raw counts | 50 Hz, 20 ms between batch samples |
 | 3 optical | `micros:u32, red:u32, infrared:u32` | each available MAX30102 FIFO sample |
 | 4 diagnostics | cumulative board counters (48 bytes) | once per second |
-| 0x80 display, computer to board | `bpm:u16, remaining_seconds:u32, flags:u8` | once per second; flags bit 0 = valid BPM |
+| 0x80 display, computer to board | `bpm:u16, remaining_seconds:u32, flags:u8, reps:u16` | once per second; flags bit 0 = valid BPM; legacy 7-byte packets omit reps |
 
 The real board also reports sensor, FIFO, timing, and transmit counters; see
 [Live/README.md](Live/README.md) for their interpretation. The board writes only
 complete frames when its USB serial transmit buffer has
 room. It does not block sensor sampling to wait for the computer. The OLED
-blinks an 8 px square in its upper-right corner when no valid display update
+blinks an 8 px square beside the timer when no valid display update
 has arrived for three seconds. The CLI reports frame sequence gaps and bad
 checksums every ten seconds and saves those counts in metadata.
 

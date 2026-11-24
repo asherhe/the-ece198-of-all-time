@@ -41,6 +41,7 @@ private:
   void update_bpm();
   void draw_heart(bool big_or_small);
   void time_left();
+  void draw_reps();
 
 public:
   OLED() : display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET) {}
@@ -50,6 +51,7 @@ public:
   // 30 minutes; the physician should be able to set this
   unsigned long workout_time = 30 * 60 * 1000;
   bool connected = false;
+  uint16_t reps = 0;
 
   void begin();
   void loop();

@@ -191,10 +191,12 @@ class RecorderTests(unittest.TestCase):
                 self.assertEqual(recorder.gaps, 1)
                 self.assertEqual(len(recorder.snapshot(now_s=100.2)["diff_raw"]), 2)
                 self.assertEqual(len(recorder.snapshot(now_s=100.2)["red"]), 1)
+                recorder.rep_count = 123
                 recorder._display_update(recorder.start_time + 1.1)
                 packet = Decoder().feed(port.writes[0])[0]
                 self.assertEqual(packet.type, 0x80)
-                self.assertEqual(len(packet.payload), 7)
+                self.assertEqual(len(packet.payload), 9)
+                self.assertEqual(struct.unpack("<HIBH", packet.payload)[3], 123)
                 recorder.feed(encode_frame(Frame(1, 4, 7_000_000, 1,
                     struct.pack("<HH", 8192, 9000))), received_at=106.1)
                 self.assertEqual(len(recorder.snapshot(now_s=106.1)["red"]), 0)

@@ -76,10 +76,11 @@ void OLED::draw_frame(bool big_or_small) {
   update_bpm();
   draw_heart(big_or_small);
   time_left();
+  draw_reps();
 
   // Host heartbeat indicator. A blinking 8 px square means disconnected.
   if (!connected && ((millis() / 500) & 1))
-    display.fillRect(120, 0, 8, 8, SSD1306_WHITE);
+    display.fillRect(67, 20, 8, 8, SSD1306_WHITE);
 
   displayOffset = 0;
   displayPending = true;
@@ -115,33 +116,28 @@ void OLED::time_left() {
   unsigned long minutes{seconds / 60};
   seconds %= 60;
 
-  unsigned long hours{minutes / 60};
-  minutes %= 60;
-
   // time is up
   if (workout_time <= millis()) {
     seconds = 0;
     minutes = 0;
-    hours = 0;
   }
 
   display.setTextSize(2);
 
-  // kind of repetitive
-  display.setCursor(85, 8);
-  if (hours < 10)
-    display.print("0");
-  display.print(hours);
-  display.print(":");
-
-  display.setCursor(85, 25);
-  if (minutes < 10)
-    display.print("0");
+  display.setCursor(67, 0);
+  if (minutes < 10) display.print("0");
   display.print(minutes);
   display.print(":");
-
-  display.setCursor(85, 42);
-  if (seconds < 10)
-    display.print("0");
+  if (seconds < 10) display.print("0");
   display.print(seconds);
+}
+
+void OLED::draw_reps() {
+  display.setTextSize(2);
+  display.setCursor(67, 24);
+  display.print("Reps:");
+  // Five digits fit in the available width at size 1.
+  display.setTextSize(2);
+  display.setCursor(67, 40);
+  display.print(reps);
 }

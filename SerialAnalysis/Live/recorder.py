@@ -313,8 +313,8 @@ class LiveRecorder:
     def _display_update(self, now: float) -> None:
         vitals = self.pulse.calculate()
         remaining = max(0, int(self.duration_min*60 - (now - self.start_time)))
-        payload = struct.pack("<HIB", vitals.bpm, remaining,
-                              int(vitals.heart_rate_valid))
+        payload = struct.pack("<HIBH", vitals.bpm, remaining,
+                              int(vitals.heart_rate_valid), min(self.rep_count, 65535))
         packet = encode_frame(Frame(0x80, 0, 0, 1, payload))
         # The OLED update is optional. USB CDC can stall on a host-to-board
         # write even while sensor frames continue arriving in the other direction.

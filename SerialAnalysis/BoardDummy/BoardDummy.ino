@@ -101,12 +101,15 @@ static void receiveDisplay() {
     if (rxSize == 0 && byte != 0xa5) continue;
     if (rxSize == 1 && byte != 0x5a) { rxSize = 0; continue; }
     rx[rxSize++] = byte;
-    if (rxSize == 12 && (rx[2] != DISPLAY_TYPE || get16(rx + 10) != 7)) rxSize = 0;
-    if (rxSize == 21) {
-      if (crc16(rx + 2, 17) == get16(rx + 19)) {
+    if (rxSize == 12 && (rx[2] != DISPLAY_TYPE ||
+        (get16(rx + 10) != 7 && get16(rx + 10) != 9))) rxSize = 0;
+    if (rxSize >= 12 && rxSize == 14 + get16(rx + 10)) {
+      const uint16_t payloadSize = get16(rx + 10);
+      if (crc16(rx + 2, 10 + payloadSize) == get16(rx + 12 + payloadSize)) {
         uint16_t bpm = get16(rx + 12);
         oled.heart_rate = (rx[18] & 1) ? bpm : 0;
         oled.workout_time = millis() + get32(rx + 14) * 1000UL;
+        oled.reps = payloadSize == 9 ? get16(rx + 19) : 0;
         oled.connected = true;
         lastHost = millis();
       }
