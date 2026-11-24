@@ -64,9 +64,7 @@ struct Biquad {
   void reset() { x1 = x2 = y1 = y2 = 0.0; }
 };
 
-// Keep in sync with EcgFilter in Live/analysis.py (verified to ~1e-8 on a shared stream).
 struct EcgFilter {
-  // Must equal 1e6 / kEcgPeriodUs from protocol.hpp (checked by a static_assert in main.cpp).
   static constexpr double FS = 400.0;
 
   // Stage 1: Non-linear spike & abrupt DC step-jump removal
@@ -104,16 +102,13 @@ struct EcgFilter {
   size_t fftCursor = 0;
   size_t hopCounter = 0;
 
-  // Stage 6: Adaptive Gain Control (AGC) Peak Envelope Tracker
-  double peakEnvelope = 50.0;
-  double targetAmplitude = 300.0;
-
   double adcMax = 16383.0;
+  double gain = 2.5;
   double prevCleanRaw = 0.0;
   bool ready = false;
 
-  EcgFilter(double maxAdcCounts = 16383.0, double targetDisplayPeak = 300.0)
-      : targetAmplitude(targetDisplayPeak), adcMax(maxAdcCounts) {
+  EcgFilter(double maxAdcCounts = 16383.0, double linearGain = 2.5)
+      : adcMax(maxAdcCounts), gain(linearGain) {
     const double pi = std::acos(-1.0);
 
     notch60.setNotch(60.0, 28.0, FS);
@@ -133,7 +128,7 @@ struct EcgFilter {
       if (freq < 1.0 || freq > 35.0) {
         eqCurve[k] = 0.05;
       } else if (freq >= 5.0 && freq <= 20.0) {
-        eqCurve[k] = 1.65;
+        eqCurve[k] = 1.5;
       } else {
         eqCurve[k] = 1.0;
       }
@@ -149,7 +144,6 @@ struct EcgFilter {
     motionHist.fill(0.0);
     nlmsWeights.fill(0.0);
     fftCursor = hopCounter = 0;
-    peakEnvelope = 50.0;
     notch60.reset();
     notch120.reset();
     for (auto &s : hpSections) s.reset();
@@ -158,7 +152,6 @@ struct EcgFilter {
     fftOutAccum.fill(0.0);
   }
 
-  // Feed dynamic acceleration (magnitude - smoothed in m/s^2) whenever an accel sample arrives
   void updateMotion(double dynamicAccelMs2) {
     latestDynamicAccel = dynamicAccelMs2;
   }
@@ -202,7 +195,7 @@ struct EcgFilter {
     motionHist[motionPos] = latestDynamicAccel;
 
     double estArtifact = 0.0;
-    double normSq = 1e-4; // Regularization constant to prevent divide-by-zero when still
+    double normSq = 1e-4;
     for (size_t k = 0; k < NLMS_TAPS; ++k) {
       double m = motionHist[(motionPos + NLMS_TAPS - k) % NLMS_TAPS];
       estArtifact += nlmsWeights[k] * m;
@@ -211,7 +204,6 @@ struct EcgFilter {
 
     double err = ecgSignal - estArtifact;
 
-    // Conservative step size (mu = 0.015) adapts to exercise movement without erasing QRS spikes
     const double mu = 0.015;
     double step = (mu * err) / normSq;
     for (size_t k = 0; k < NLMS_TAPS; ++k) {
@@ -248,7 +240,7 @@ struct EcgFilter {
         }
 
         double snr = mag / std::max(noiseFloor[k], 1e-6);
-        double gate = (snr > 1.2) ? (1.0 - 1.0 / (snr * snr)) : 0.1;
+        double gate = (snr > 1.1) ? (1.0 - 0.5 / (snr * snr)) : 0.35;
         double totalGain = eqCurve[k] * gate;
 
         spec[k] *= totalGain;
@@ -309,19 +301,6 @@ struct EcgFilter {
 
     // 5. Sliding FFT Spectral Equalizer & Adaptive Noise Gate
     double specClean = processSpectralBlock(x);
-
-    // 6. Adaptive Gain Control (AGC) + Non-Linear Soft-Knee Expansion
-    double absVal = std::abs(specClean);
-    // Fast attack, slow decay (~3.5 seconds at 400 Hz) to track R-wave envelope
-    if (absVal > peakEnvelope) {
-      peakEnvelope += 0.15 * (absVal - peakEnvelope);
-    } else {
-      peakEnvelope = std::max(10.0, peakEnvelope * 0.9993);
-    }
-
-    double dynamicKnee = std::max(5.0, 0.25 * peakEnvelope);
-    double dynamicBoost = std::clamp(targetAmplitude / peakEnvelope, 0.5, 25.0);
-    double softGate = (absVal * absVal) / (absVal * absVal + dynamicKnee * dynamicKnee);
-    return dynamicBoost * softGate * dynamicKnee * std::asinh(specClean / dynamicKnee);
+    return specClean * gain;
   }
 };

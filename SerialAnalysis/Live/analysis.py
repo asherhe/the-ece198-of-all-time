@@ -2,7 +2,7 @@
 
 from collections import deque
 from dataclasses import dataclass
-from math import asinh, cos, pi, sin, sqrt
+from math import cos, pi, sin, sqrt
 from statistics import fmean, median
 
 import numpy as np
@@ -78,8 +78,8 @@ class EcgFilter:
 
     Stages: spike/step removal by cascaded medians, NLMS accelerometer motion
     cancellation, 60/120 Hz notches, 1 Hz high-pass and 35 Hz low-pass
-    biquads, a sliding-FFT spectral equaliser/noise gate, then AGC with a
-    soft-knee expander.
+    biquads, and a sliding-FFT spectral equaliser/noise gate with clean
+    linear gain.
     """
 
     FS = float(ECG_RATE_HZ)
@@ -89,9 +89,9 @@ class EcgFilter:
     FFT_N = 128
     FFT_HOP = 32
 
-    def __init__(self, adc_max: float = 16383.0, target_display_peak: float = 300.0):
+    def __init__(self, adc_max: float = 16383.0, gain: float = 2.5):
         self.adc_max = adc_max
-        self.target_amplitude = target_display_peak
+        self.gain = gain
         self.notch60 = Biquad.notch(60.0, 28.0, self.FS)
         self.notch120 = Biquad.notch(120.0, 28.0, self.FS)
         q8 = (0.50979558, 0.60134489, 0.89997622, 2.56291545)
@@ -102,7 +102,7 @@ class EcgFilter:
         self.hann = 0.5 * (1.0 - np.cos(2.0 * pi * np.arange(n) / n))
         freqs = np.arange(n // 2 + 1) * self.FS / n
         self.eq_curve = np.where((freqs < 1.0) | (freqs > 35.0), 0.05,
-                                 np.where((freqs >= 5.0) & (freqs <= 20.0), 1.65, 1.0))
+                                 np.where((freqs >= 5.0) & (freqs <= 20.0), 1.5, 1.0))
         # The noise floor is a long-term estimate; like the C++ filter it
         # survives reset() so a short stream gap does not discard it.
         self.noise_floor = np.full(n // 2 + 1, 5.0)
@@ -121,7 +121,6 @@ class EcgFilter:
         self.fft_out = np.zeros(self.FFT_N)
         self.fft_cursor = 0
         self.fft_hop = 0
-        self.peak_envelope = 50.0
         self.notch60.reset()
         self.notch120.reset()
         for hp in self.hp_sections:
@@ -145,7 +144,7 @@ class EcgFilter:
         return err
 
     def _run_spectral_block(self, sample: float) -> float:
-        """128-point sliding FFT (hop 32) equaliser with an adaptive noise gate.
+        """128-point sliding FFT (hop 32) equaliser with a gentle noise gate.
 
         Output is delayed by one FFT length (320 ms at 400 Hz), exactly like
         the C++ implementation.
@@ -167,7 +166,7 @@ class EcgFilter:
                              0.998 * floor + 0.002 * mag)
             self.noise_floor = floor
             snr = mag / np.maximum(floor, 1e-6)
-            gate = np.where(snr > 1.2, 1.0 - 1.0 / np.maximum(snr, 1.2) ** 2, 0.1)
+            gate = np.where(snr > 1.1, 1.0 - 0.5 / np.maximum(snr, 1.1) ** 2, 0.35)
             frame = np.fft.irfft(spectrum * (self.eq_curve * gate), n)
             self.fft_out += np.roll(frame, cursor) * (2.0 / 3.0)
         return out
@@ -206,17 +205,7 @@ class EcgFilter:
             x = lp.run(x)
 
         x = self._run_spectral_block(x)
-
-        abs_val = abs(x)
-        if abs_val > self.peak_envelope:
-            self.peak_envelope += 0.15 * (abs_val - self.peak_envelope)
-        else:
-            self.peak_envelope = max(10.0, self.peak_envelope * 0.9993)
-
-        dynamic_knee = max(5.0, 0.25 * self.peak_envelope)
-        dynamic_boost = max(0.5, min(25.0, self.target_amplitude / self.peak_envelope))
-        soft_gate = (abs_val * abs_val) / (abs_val * abs_val + dynamic_knee * dynamic_knee)
-        return dynamic_boost * soft_gate * dynamic_knee * asinh(x / dynamic_knee)
+        return x * self.gain
 
 
 class AccelerationAnalysis:
@@ -229,6 +218,7 @@ class AccelerationAnalysis:
         magnitude = sqrt((x * scale) ** 2 + (y * scale) ** 2 + (z * scale) ** 2)
         self.smoothed = 0.2 * magnitude + 0.8 * self.smoothed
         return magnitude, self.smoothed
+
 class RepCounter:
     ALPHA_DC = 0.015
     ALPHA_LP = 0.16
