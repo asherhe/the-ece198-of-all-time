@@ -21,7 +21,7 @@ port = sys.argv[1] if len(sys.argv) > 1 else "COM8"
 decoder = Decoder()
 
 # Expected board-time advance per frame = count * per-sample period (us).
-PERIOD_US = {1: 5000, 2: 20000}  # ECG 200 Hz, accel 50 Hz
+PERIOD_US = {1: 2500, 2: 20000}  # ECG 400 Hz, accel 50 Hz
 last_ts = {}
 last_seq = {}
 jumps = {1: [], 2: []}
@@ -50,7 +50,7 @@ for t, label in ((1, "ECG"), (2, "ACCEL")):
         print(f"{label}: no data")
         continue
     nominal = None
-    # Nominal per-frame board-time advance: ECG 8*5000=40000, accel 5*20000=100000
+    # Nominal per-frame board-time advance: ECG 8*2500=20000, accel 5*20000=100000
     worst = js[-3:]
     big = sum(1 for j in js if j > 300000)  # >300 ms board-time jump = real stall
     print(f"{label}: frames_compared={len(js)} seq_gaps={seq_gaps[t]} "

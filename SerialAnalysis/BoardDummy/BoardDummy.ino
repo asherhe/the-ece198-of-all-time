@@ -99,7 +99,7 @@ static void receiveDisplay() {
   while (Serial.available()) {
     uint8_t byte = Serial.read();
     if (rxSize == 0 && byte != 0xa5) continue;
-    if (rxSize == 1 && byte != 0x5a) { rxSize = 0; continue; }
+    if (rxSize == 1 && byte != 0x5a) { rxSize = (byte == 0xa5) ? 1 : 0; continue; }  // keep a repeated 0xa5
     rx[rxSize++] = byte;
     if (rxSize == 12 && (rx[2] != DISPLAY_TYPE ||
         (get16(rx + 10) != 7 && get16(rx + 10) != 9))) rxSize = 0;
@@ -129,7 +129,7 @@ void setup() {
 void loop() {
   receiveDisplay();
   uint32_t now = micros();
-  if ((int32_t)(now - nextEcg) >= 0) { sampleEcg(nextEcg); nextEcg += 5000; }
+  if ((int32_t)(now - nextEcg) >= 0) { sampleEcg(nextEcg); nextEcg += 2500; /* 400 Hz, as Board.ino */ }
   if ((int32_t)(now - nextAccel) >= 0) { sampleAccel(nextAccel); nextAccel += 20000; }
   if ((int32_t)(now - nextOptical) >= 0) { sampleOptical(nextOptical); nextOptical += 10000; }
   if (oled.connected && millis() - lastHost > HOST_TIMEOUT_MS) {

@@ -1,1 +1,4 @@
 **/session
+
+sessions/*
+!sessions/.gitkeep
